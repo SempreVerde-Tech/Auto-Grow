@@ -250,28 +250,33 @@ void updateDisplay() {
 
   switch (currentState) {
     case MAIN:
-      // Atualiza apenas quando mudar valores
+      // Lógica de exibição da tela principal
       float currentAveragePH = averagePH();
-      if (fabs(lastDisplayedPH - currentAveragePH) > 0.05 || fabs(lastDisplayedTemp - temperature) > 0.2 || fabs(lastDisplayedPIdeal - pHIdeal) > 0.05) {
-        // Indicador de medição
+
+      // Atualiza a linha de status/alerta
+      if (pHBelowIdeal) {
+        lcd.setCursor(0, 0);
+        lcd.print("** ALERTA: PH BAIXO **");
+      } else {
         const char spinner[] = {'|', '/', '-', '\\'};
         char indicator = spinner[readingIndex % 4];
-
         lcd.setCursor(0, 0);
         lcd.print("STATUS ATUAL ");
         lcd.print(indicator);
-        lcd.print("      "); // limpa resto da linha
+        lcd.print("      ");
+      }
 
+      // Atualiza as linhas de dados apenas se os valores mudarem, para evitar flicker
+      if (fabs(lastDisplayedPH - currentAveragePH) > 0.05 || fabs(lastDisplayedTemp - temperature) > 0.2 || lastDisplayState != currentState) {
         lcd.setCursor(0, 1);
-        lcd.print("PH Medio: "); // Alterado para "Medio" para refletir o valor médio
+        lcd.print("PH Medio: ");
         lcd.print(currentAveragePH, 2);
         lcd.print("   ");
 
         lcd.setCursor(0, 2);
-        lcd.print("Temp: ");
-        lcd.print(temperature, 1);
-        lcd.print((char)223); // símbolo º
-        lcd.print("C   ");
+        lcd.print("PH Inst.: "); // Mostra a última leitura instantânea
+        lcd.print(pHValue, 2);
+        lcd.print("   ");
 
         lcd.setCursor(0, 3);
         lcd.print("PH Ideal: ");
@@ -281,16 +286,6 @@ void updateDisplay() {
         lastDisplayedPH = currentAveragePH;
         lastDisplayedTemp = temperature;
         lastDisplayedPIdeal = pHIdeal;
-      }
-
-      if (pHBelowIdeal) {
-        // Mensagem de alerta ocupa a tela inteira - só mostra quando estado muda
-        lcd.clear();
-        lcd.setCursor(0,0);
-        lcd.print("PH ABAIXO DO IDEAL");
-        lcd.setCursor(0,1);
-        lcd.print("PH Medio: ");
-        lcd.print(currentAveragePH, 2);
       }
       break;
       
@@ -390,6 +385,16 @@ void updateDisplay() {
       lcd.print("Sim: pressione MENU");
       lcd.setCursor(0, 3);
       lcd.print("Nao: pressione Outro");
+      break;
+
+    case PH_ALERT:
+      lcd.setCursor(0, 0);
+      lcd.print("ALERTA: PH BAIXO   ");
+      lcd.setCursor(0, 1);
+      lcd.print("PH Medio: ");
+      lcd.print(averagePH(), 2);
+      lcd.setCursor(0, 3);
+      lcd.print("Pressione p/ Voltar");
       break;
   }
 }
@@ -857,18 +862,18 @@ bool isPHStable() {
 }
 
 void controlPump() {
-  // Prioridade de segurança: se pH está abaixo do ideal, acende LED e garante bomba desligada
-  if (pHValue < pHIdeal - 0.3) {
+  // Usa a média para a decisão de alerta para evitar flutuações
+  if (averagePH() < pHIdeal - 0.3) {
     pHBelowIdeal = true;
     digitalWrite(ledPin, HIGH);
-    // desliga bomba caso esteja ativa
+    // Garante que a bomba seja desligada se estiver ativa
     if (pumpActive) {
       digitalWrite(pumpPin, LOW);
       pumpActive = false;
       waitingAfterPump = true;
       lastPumpTime = millis();
     }
-    return;
+    return; // Sai da função para não tentar dosar se o pH estiver muito baixo
   } else {
     pHBelowIdeal = false;
     digitalWrite(ledPin, LOW);
