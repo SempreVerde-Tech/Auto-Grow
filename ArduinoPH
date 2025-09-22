@@ -253,7 +253,7 @@ void updateDisplay() {
       // Lógica de exibição da tela principal
       float currentAveragePH = averagePH();
 
-      // Atualiza a linha de status/alerta
+      // Atualiza a linha de status/alerta (cabeçalho)
       if (pHBelowIdeal) {
         lcd.setCursor(0, 0);
         lcd.print("** ALERTA: PH BAIXO **");
@@ -267,20 +267,28 @@ void updateDisplay() {
       }
 
       // Atualiza as linhas de dados apenas se os valores mudarem, para evitar flicker
-      if (fabs(lastDisplayedPH - currentAveragePH) > 0.05 || fabs(lastDisplayedTemp - temperature) > 0.2 || lastDisplayState != currentState) {
+      if (fabs(lastDisplayedPH - currentAveragePH) > 0.05 ||
+          fabs(lastDisplayedTemp - temperature) > 0.2 ||
+          fabs(lastDisplayedPIdeal - pHIdeal) > 0.05 ||
+          lastDisplayState != currentState) {
+
         lcd.setCursor(0, 1);
         lcd.print("PH Medio: ");
         lcd.print(currentAveragePH, 2);
-        lcd.print("   ");
+        lcd.print("      ");
 
         lcd.setCursor(0, 2);
-        lcd.print("PH Inst.: "); // Mostra a última leitura instantânea
+        lcd.print("PH Inst.: ");
         lcd.print(pHValue, 2);
-        lcd.print("   ");
+        lcd.print("      ");
 
         lcd.setCursor(0, 3);
-        lcd.print("PH Ideal: ");
-        lcd.print(pHIdeal, 2);
+        lcd.print("T:");
+        lcd.print(temperature, 1);
+        lcd.print((char)223);
+        lcd.print("C ");
+        lcd.print("Ideal:");
+        lcd.print(pHIdeal, 1);
         lcd.print("   ");
 
         lastDisplayedPH = currentAveragePH;
@@ -385,16 +393,6 @@ void updateDisplay() {
       lcd.print("Sim: pressione MENU");
       lcd.setCursor(0, 3);
       lcd.print("Nao: pressione Outro");
-      break;
-
-    case PH_ALERT:
-      lcd.setCursor(0, 0);
-      lcd.print("ALERTA: PH BAIXO   ");
-      lcd.setCursor(0, 1);
-      lcd.print("PH Medio: ");
-      lcd.print(averagePH(), 2);
-      lcd.setCursor(0, 3);
-      lcd.print("Pressione p/ Voltar");
       break;
   }
 }
