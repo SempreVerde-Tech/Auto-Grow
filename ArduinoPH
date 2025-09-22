@@ -61,6 +61,7 @@ float pHReadings[PH_READING_COUNT];
 int readingIndex = 0;
 unsigned long lastPumpTime = 0;
 unsigned long lastPhReadTime = 0;
+unsigned long lastTempReadTime = 0;
 bool pumpActive = false;
 bool waitingAfterPump = false;
 bool pHBelowIdeal = false;
@@ -133,11 +134,16 @@ void setup() {
 }
 
 void loop() {
-  readTemperature();
-  if (millis() - lastPhReadTime >= 1000) {
+  // Leitura de sensores baseada em tempo para não bloquear o loop
+  if (millis() - lastTempReadTime >= 2000) { // Lê temperatura a cada 2 segundos
+    lastTempReadTime = millis();
+    readTemperature();
+  }
+  if (millis() - lastPhReadTime >= 1000) { // Lê pH a cada 1 segundo
     lastPhReadTime = millis();
     readpH();
   }
+
   checkButtons();
   controlPump();
   updateDisplay();
@@ -158,9 +164,7 @@ void loop() {
 void readTemperature() {
   sensors.requestTemperatures();
   float t = sensors.getTempCByIndex(0);
-  if (t == DEVICE_DISCONNECTED_C || isnan(t) || t < -40 || t > 125) {
-    temperature = 25.0;
-  } else {
+  if (t != DEVICE_DISCONNECTED_C && !isnan(t) && t > -40 && t < 125) {
     temperature = t;
   }
 }
@@ -225,46 +229,26 @@ void updateDisplay() {
 
     switch (currentState) {
         case MAIN: {
-            // Redesenha o cabeçalho (linha 0) a cada ciclo para o spinner girar
             if (pHBelowIdeal) {
-                lcd.setCursor(0, 0);
-                lcd.print("** ALERTA: PH BAIXO **");
+                if (lastAlertState != pHBelowIdeal) { lcd.clear(); } // Limpa só na transição para o alerta
+                lcd.setCursor(0, 0); lcd.print("** ALERTA: PH BAIXO **");
             } else {
+                if (lastAlertState != pHBelowIdeal) { lcd.clear(); } // Limpa só na transição de volta do alerta
                 const char spinner[] = {'|', '/', '-', '\\'};
                 char indicator = spinner[readingIndex % 4];
-                lcd.setCursor(0, 0);
-                lcd.print("STATUS ATUAL ");
-                lcd.print(indicator);
-                lcd.print("      ");
+                lcd.setCursor(0, 0); lcd.print("STATUS ATUAL "); lcd.print(indicator); lcd.print("      ");
             }
+            lastAlertState = pHBelowIdeal;
 
-            // Redesenha as linhas de dados (1-3) apenas se os valores mudarem
             float currentAveragePH = averagePH();
             bool dataChanged = fabs(lastDisplayedPH - currentAveragePH) > 0.05 ||
                                fabs(lastDisplayedTemp - temperature) > 0.2 ||
                                fabs(lastDisplayedPIdeal - pHIdeal) > 0.05;
-            if (lastAlertState != pHBelowIdeal) {
-                dataChanged = true;
-                lastAlertState = pHBelowIdeal;
-            }
 
             if (dataChanged) {
-                lcd.setCursor(0, 1);
-                lcd.print("PH Medio: ");
-                lcd.print(currentAveragePH, 2);
-                lcd.print("      ");
-                lcd.setCursor(0, 2);
-                lcd.print("PH Inst.: ");
-                lcd.print(pHValue, 2);
-                lcd.print("      ");
-                lcd.setCursor(0, 3);
-                lcd.print("T:");
-                lcd.print(temperature, 1);
-                lcd.print((char)223);
-                lcd.print("C ");
-                lcd.print("Ideal:");
-                lcd.print(pHIdeal, 1);
-                lcd.print("   ");
+                lcd.setCursor(0, 1); lcd.print("PH Medio: "); lcd.print(currentAveragePH, 2); lcd.print("      ");
+                lcd.setCursor(0, 2); lcd.print("PH Inst.: "); lcd.print(pHValue, 2); lcd.print("      ");
+                lcd.setCursor(0, 3); lcd.print("T:"); lcd.print(temperature, 1); lcd.print((char)223); lcd.print("C "); lcd.print("Ideal:"); lcd.print(pHIdeal, 1); lcd.print("   ");
                 lastDisplayedPH = currentAveragePH;
                 lastDisplayedTemp = temperature;
                 lastDisplayedPIdeal = pHIdeal;
@@ -400,8 +384,8 @@ void handleCalibrateOnePoint() {
         float sum = 0;
         for (int i = 0; i < PH_READING_COUNT; i++) {
             int analogValue = analogRead(pHPin); float voltage = analogValue * (ADC_REF / ADC_MAX); sum += voltage;
-            lcd.setCursor(0, 1); lcd.print("Leitura " + String(i + 1) + "/" + String(PH_READING_COUNT) + "   ");
-            lcd.setCursor(0, 2); lcd.print("Tensao: " + String(voltage, 3) + "V   ");
+            lcd.setCursor(0, 1); lcd.print("Leitura "); lcd.print(i + 1); lcd.print("/"); lcd.print(PH_READING_COUNT);
+            lcd.setCursor(0, 2); lcd.print("Tensao: "); lcd.print(voltage, 3); lcd.print("V   ");
             delay(250);
         }
         float avgVoltage = sum / (float)PH_READING_COUNT;
@@ -433,8 +417,8 @@ void handleCalibrateTwoPointFirst() {
         float sum = 0;
         for (int i = 0; i < PH_READING_COUNT; i++) {
             int analogValue = analogRead(pHPin); float voltage = analogValue * (ADC_REF / ADC_MAX); sum += voltage;
-            lcd.setCursor(0, 1); lcd.print("Leitura " + String(i + 1) + "/" + String(PH_READING_COUNT) + "   ");
-            lcd.setCursor(0, 2); lcd.print("Tensao: " + String(voltage, 3) + "V   ");
+            lcd.setCursor(0, 1); lcd.print("Leitura "); lcd.print(i + 1); lcd.print("/"); lcd.print(PH_READING_COUNT);
+            lcd.setCursor(0, 2); lcd.print("Tensao: "); lcd.print(voltage, 3); lcd.print("V   ");
             delay(250);
         }
         firstCalibValue = sum / (float)PH_READING_COUNT;
@@ -458,8 +442,8 @@ void handleCalibrateTwoPointSecond() {
         float sum = 0;
         for (int i = 0; i < PH_READING_COUNT; i++) {
             int analogValue = analogRead(pHPin); float voltage = analogValue * (ADC_REF / ADC_MAX); sum += voltage;
-            lcd.setCursor(0, 1); lcd.print("Leitura " + String(i + 1) + "/" + String(PH_READING_COUNT) + "   ");
-            lcd.setCursor(0, 2); lcd.print("Tensao: " + String(voltage, 3) + "V   ");
+            lcd.setCursor(0, 1); lcd.print("Leitura "); lcd.print(i + 1); lcd.print("/"); lcd.print(PH_READING_COUNT);
+            lcd.setCursor(0, 2); lcd.print("Tensao: "); lcd.print(voltage, 3); lcd.print("V   ");
             delay(250);
         }
         float secondCalibValue = sum / (float)PH_READING_COUNT;
