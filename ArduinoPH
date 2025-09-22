@@ -57,7 +57,8 @@ enum State {
   CALIBRATE_MODE,             // Seleção do modo de calibração
   CALIBRATE_ONE_POINT,        // Calibração de um ponto
   CALIBRATE_TWO_POINT_FIRST,  // Primeira etapa calibração dois pontos
-  CALIBRATE_TWO_POINT_SECOND  // Segunda etapa calibração dois pontos
+  CALIBRATE_TWO_POINT_SECOND, // Segunda etapa calibração dois pontos
+  INITIAL_CALIBRATION_PROMPT  // Pergunta se quer calibrar no primeiro uso
 };
 State currentState = MAIN;    // Estado inicial do sistema
 
@@ -69,11 +70,13 @@ unsigned long lastButtonPress = 0;  // Último momento que um botão foi pressio
 const unsigned long timeout = 30000; // Tempo de inatividade para retornar ao menu principal (30 segundos)
 
 // Variáveis para medição e controle do pH
-float pHReadings[5];          // Array para armazenar as últimas 5 leituras de pH
+const int PH_READING_COUNT = 10; // Aumentado para 10 leituras
+float pHReadings[PH_READING_COUNT]; // Array para armazenar as últimas leituras de pH
 int readingIndex = 0;         // Índice atual no array de leituras
 unsigned long lastPumpTime = 0; // Último momento que a bomba foi ativada (ou parada)
+unsigned long lastPhReadTime = 0; // Para controlar o intervalo de leitura do pH
 const unsigned long pumpDuration = 10000; // Tempo que a bomba fica ligada (10 segundos)
-const unsigned long waitAfterPump = 600000; // Tempo de espera após ativar bomba (10 minutos)
+const unsigned long waitAfterPump = 300000; // Tempo de espera após ativar bomba (5 minutos)
 bool pumpActive = false;      // Indica se a bomba está ativa no momento
 bool waitingAfterPump = false; // Indica se estamos no período de espera após ativação da bomba
 
@@ -126,12 +129,7 @@ void setup() {
   
   // Verificar se é a primeira execução do sistema
   if (EEPROM.read(FIRST_RUN_FLAG_ADDR) != 123) {
-    lcd.print("Calibracao necessaria");
-    lcd.setCursor(0, 1);
-    lcd.print("Antes do primeiro uso");
-    delay(2000);
-    lcd.clear();
-    currentState = CALIBRATE_MODE;
+    currentState = INITIAL_CALIBRATION_PROMPT; // Pergunta ao usuário em vez de forçar
     EEPROM.write(FIRST_RUN_FLAG_ADDR, 123);
   }
   
@@ -139,7 +137,7 @@ void setup() {
   loadSettings();
   
   // Inicializar o array de leituras de pH com valores neutros
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < PH_READING_COUNT; i++) {
     pHReadings[i] = 7.0;
   }
 }
@@ -147,9 +145,12 @@ void setup() {
 void loop() {
   // Ler a temperatura atual
   readTemperature();
-  
-  // Ler o pH atual
-  readpH();
+
+  // Ler o pH em intervalos definidos para uma amostragem mais estável
+  if (millis() - lastPhReadTime >= 1000) {
+    lastPhReadTime = millis();
+    readpH();
+  }
   
   // Verificar o estado dos botões (com debounce)
   checkButtons();
@@ -188,6 +189,9 @@ void loop() {
       break;
     case CALIBRATE_TWO_POINT_SECOND:
       handleCalibrateTwoPointSecond();
+      break;
+    case INITIAL_CALIBRATION_PROMPT:
+      handleInitialCalibrationPrompt();
       break;
   }
   
@@ -230,7 +234,7 @@ void readpH() {
   if (!isnan(pHcalc) && pHcalc > -5 && pHcalc < 20) {
     pHValue = pHcalc;
     pHReadings[readingIndex] = pHValue;
-    readingIndex = (readingIndex + 1) % 5;
+    readingIndex = (readingIndex + 1) % PH_READING_COUNT;
   }
 }
 
@@ -366,6 +370,15 @@ void updateDisplay() {
       } else {
         lcd.print("  ---              ");
       }
+      break;
+
+    case INITIAL_CALIBRATION_PROMPT:
+      lcd.setCursor(0, 0);
+      lcd.print("Calibrar sensor?");
+      lcd.setCursor(0, 2);
+      lcd.print("Sim: pressione MENU");
+      lcd.setCursor(0, 3);
+      lcd.print("Nao: pressione Outro");
       break;
   }
 }
@@ -661,6 +674,19 @@ void handleCalibrateTwoPointFirst() {
   }
 }
 
+void handleInitialCalibrationPrompt() {
+  if (menuPressed) {
+    currentState = CALIBRATE_MODE;
+    menuPressed = false;
+    lcd.clear();
+  } else if (upPressed || downPressed) {
+    currentState = MAIN;
+    upPressed = false;
+    downPressed = false;
+    lcd.clear();
+  }
+}
+
 void handleCalibrateTwoPointSecond() {
   if (upPressed) {
     do {
@@ -725,11 +751,15 @@ void handleCalibrateTwoPointSecond() {
     } else {
       // slope = ΔV / ΔpH  (V por pH)
       float newSlope = (secondCalibValue - firstCalibValue) / denom;
-      if (fabs(newSlope) < 1e-6) {
-        // valor absurdo: aborta
+      // Verificação de segurança: O slope para uma sonda de pH deve ser negativo e dentro de uma faixa razoável.
+      // O valor teórico é ~ -0.059 V/pH. Aceitamos uma faixa mais ampla por segurança.
+      if (newSlope > -0.040 || newSlope < -0.080) { // Se o slope estiver fora da faixa de -40 a -80 mV/pH
+        // valor absurdo ou fisicamente implausível: aborta
         lcd.clear();
-        lcd.print("Erro: slope invalido");
-        delay(1500);
+        lcd.print("Erro de Calibracao");
+        lcd.setCursor(0, 1);
+        lcd.print("Slope invalido!");
+        delay(3000);
       } else {
         pHSlope = newSlope;
         pHOffset = firstCalibValue - (pHSlope * targetpH1);
@@ -749,37 +779,48 @@ void handleCalibrateTwoPointSecond() {
 }
 
 void pHStabilityCheck() {
-  // Implementação básica - verificar variação nas últimas leituras
-  float minVal = pHReadings[0];
-  float maxVal = pHReadings[0];
-  
-  for (int i = 1; i < 5; i++) {
-    if (pHReadings[i] < minVal) minVal = pHReadings[i];
-    if (pHReadings[i] > maxVal) maxVal = pHReadings[i];
-  }
-  
-  // Se a variação for maior que 0.2, considerar instável -> não realizar dosing
-  // Aqui só atualizamos flag visual; decisão real é tomada em controlPump() chamando isPHStable()
-  if (maxVal - minVal > 0.2) {
-    // pH instável - não ativar bomba
-    // nada a fazer além de manter leitura atual; controlePump checa estabilidade
-  }
+  // Esta função agora é apenas um wrapper para isPHStable, que contém a lógica principal.
+  // A decisão de dosagem é feita em controlPump() com base em isPHStable().
+  // O propósito original desta função era principalmente visual ou para flags,
+  // e a lógica foi consolidada em isPHStable para maior clareza.
 }
 
-// Retorna média das últimas leituras
+// Retorna média das últimas leituras com filtro de anomalias (trimmed mean)
 float averagePH() {
+  float sortedReadings[PH_READING_COUNT];
+  for (int i = 0; i < PH_READING_COUNT; i++) {
+    sortedReadings[i] = pHReadings[i];
+  }
+
+  // Ordena as leituras (Bubble Sort simples, eficiente para N pequeno)
+  for (int i = 0; i < PH_READING_COUNT - 1; i++) {
+    for (int j = 0; j < PH_READING_COUNT - i - 1; j++) {
+      if (sortedReadings[j] > sortedReadings[j + 1]) {
+        float temp = sortedReadings[j];
+        sortedReadings[j] = sortedReadings[j + 1];
+        sortedReadings[j + 1] = temp;
+      }
+    }
+  }
+
+  // Calcula a média, descartando as 2 menores e 2 maiores leituras
   float sum = 0;
-  for (int i=0;i<5;i++) sum += pHReadings[i];
-  return sum / 5.0;
+  for (int i = 2; i < PH_READING_COUNT - 2; i++) {
+    sum += sortedReadings[i];
+  }
+
+  // A média é sobre 6 leituras (10 - 2 - 2)
+  return sum / (PH_READING_COUNT - 4);
 }
 
 bool isPHStable() {
   float minVal = pHReadings[0];
   float maxVal = pHReadings[0];
-  for (int i=1;i<5;i++) {
+  for (int i = 1; i < PH_READING_COUNT; i++) {
     if (pHReadings[i] < minVal) minVal = pHReadings[i];
     if (pHReadings[i] > maxVal) maxVal = pHReadings[i];
   }
+  // A estabilidade é considerada se a variação no conjunto completo de leituras for pequena
   return (maxVal - minVal) <= 0.2;
 }
 
