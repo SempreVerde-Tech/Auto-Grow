@@ -251,23 +251,34 @@ void updateDisplay() {
   switch (currentState) {
     case MAIN:
       // Atualiza apenas quando mudar valores
-      if (fabs(lastDisplayedPH - pHValue) > 0.05 || fabs(lastDisplayedTemp - temperature) > 0.2 || fabs(lastDisplayedPIdeal - pHIdeal) > 0.05) {
+      float currentAveragePH = averagePH();
+      if (fabs(lastDisplayedPH - currentAveragePH) > 0.05 || fabs(lastDisplayedTemp - temperature) > 0.2 || fabs(lastDisplayedPIdeal - pHIdeal) > 0.05) {
+        // Indicador de medição
+        const char spinner[] = {'|', '/', '-', '\\'};
+        char indicator = spinner[readingIndex % 4];
+
         lcd.setCursor(0, 0);
-        lcd.print("STATUS ATUAL       "); // limpa resto da linha
+        lcd.print("STATUS ATUAL ");
+        lcd.print(indicator);
+        lcd.print("      "); // limpa resto da linha
+
         lcd.setCursor(0, 1);
-        lcd.print("PH Atual: ");
-        lcd.print(pHValue, 2);
+        lcd.print("PH Medio: "); // Alterado para "Medio" para refletir o valor médio
+        lcd.print(currentAveragePH, 2);
         lcd.print("   ");
+
         lcd.setCursor(0, 2);
         lcd.print("Temp: ");
         lcd.print(temperature, 1);
         lcd.print((char)223); // símbolo º
         lcd.print("C   ");
+
         lcd.setCursor(0, 3);
         lcd.print("PH Ideal: ");
         lcd.print(pHIdeal, 2);
         lcd.print("   ");
-        lastDisplayedPH = pHValue;
+
+        lastDisplayedPH = currentAveragePH;
         lastDisplayedTemp = temperature;
         lastDisplayedPIdeal = pHIdeal;
       }
@@ -278,8 +289,8 @@ void updateDisplay() {
         lcd.setCursor(0,0);
         lcd.print("PH ABAIXO DO IDEAL");
         lcd.setCursor(0,1);
-        lcd.print("PH Atual: ");
-        lcd.print(pHValue, 2);
+        lcd.print("PH Medio: ");
+        lcd.print(currentAveragePH, 2);
       }
       break;
       
@@ -576,15 +587,22 @@ void handleCalibrateOnePoint() {
     lcd.clear();
     lcd.print("CALIBRANDO...");
     
-    // Fazer várias leituras e calcular média (em tensão)
+    // Fazer várias leituras e calcular média (em tensão), mostrando feedback
     float sum = 0;
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < PH_READING_COUNT; i++) {
       int analogValue = analogRead(pHPin);
       float voltage = analogValue * (ADC_REF / ADC_MAX);
       sum += voltage;
+
+      // Feedback visual
+      lcd.setCursor(0, 1);
+      lcd.print("Leitura " + String(i + 1) + "/" + String(PH_READING_COUNT) + "   ");
+      lcd.setCursor(0, 2);
+      lcd.print("Tensao: " + String(voltage, 3) + "V   ");
+
       // while calibrating, atualiza temp para manter coerência
       sensors.requestTemperatures();
-      delay(80);
+      delay(250); // Aumentar um pouco o delay para ser legível
     }
     float avgVoltage = sum / 10.0;
     
@@ -651,13 +669,20 @@ void handleCalibrateTwoPointFirst() {
     lcd.clear();
     lcd.print("CALIBRANDO...");
     
-    // Fazer várias leituras e calcular média (em tensão)
+    // Fazer várias leituras e calcular média (em tensão), mostrando feedback
     float sum = 0;
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < PH_READING_COUNT; i++) {
       int analogValue = analogRead(pHPin);
       float voltage = analogValue * (ADC_REF / ADC_MAX);
       sum += voltage;
-      delay(80);
+
+      // Feedback visual
+      lcd.setCursor(0, 1);
+      lcd.print("Leitura " + String(i + 1) + "/" + String(PH_READING_COUNT) + "   ");
+      lcd.setCursor(0, 2);
+      lcd.print("Tensao: " + String(voltage, 3) + "V   ");
+
+      delay(250); // Aumentar um pouco o delay para ser legível
     }
     firstCalibValue = sum / 10.0;
     
@@ -719,13 +744,20 @@ void handleCalibrateTwoPointSecond() {
     lcd.clear();
     lcd.print("CALIBRANDO...");
     
-    // Fazer várias leituras e calcular média (em tensão)
+    // Fazer várias leituras e calcular média (em tensão), mostrando feedback
     float sum = 0;
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < PH_READING_COUNT; i++) {
       int analogValue = analogRead(pHPin);
       float voltage = analogValue * (ADC_REF / ADC_MAX);
       sum += voltage;
-      delay(80);
+
+      // Feedback visual
+      lcd.setCursor(0, 1);
+      lcd.print("Leitura " + String(i + 1) + "/" + String(PH_READING_COUNT) + "   ");
+      lcd.setCursor(0, 2);
+      lcd.print("Tensao: " + String(voltage, 3) + "V   ");
+
+      delay(250); // Aumentar um pouco o delay para ser legível
     }
     float secondCalibValue = sum / 10.0;
     
