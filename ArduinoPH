@@ -1,10 +1,11 @@
 /*
   Sistema de Controle de pH Automático para Arduino
   Autor: Jules (baseado no código de "Chai" e aprimorado com as solicitações do usuário)
-  Versão: Final e Corrigida
+  Versão: Final e Corrigida com Watchdog
   Descrição: Este firmware controla o pH de uma solução, com compensação de temperatura,
   calibração de 1 e 2 pontos, e uma interface de usuário não-bloqueante no LCD.
-  Inclui lógica robusta para medição de pH e é configurável para botões físicos ou touch.
+  Inclui lógica robusta para medição de pH, é configurável para botões físicos ou touch,
+  e possui um watchdog timer para máxima estabilidade a longo prazo.
 */
 
 #include <Wire.h>
@@ -12,6 +13,7 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <EEPROM.h>
+#include <avr/wdt.h> // Biblioteca para o Watchdog Timer
 
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
@@ -131,15 +133,18 @@ void setup() {
   for (int i = 0; i < PH_READING_COUNT; i++) {
     pHReadings[i] = 7.0;
   }
+
+  wdt_enable(WDTO_4S); // Habilita o Watchdog com um timeout de 4 segundos
 }
 
 void loop() {
-  // Leitura de sensores baseada em tempo para não bloquear o loop
-  if (millis() - lastTempReadTime >= 2000) { // Lê temperatura a cada 2 segundos
+  wdt_reset(); // Reseta o watchdog em cada ciclo para indicar que o sistema está funcionando
+
+  if (millis() - lastTempReadTime >= 2000) {
     lastTempReadTime = millis();
     readTemperature();
   }
-  if (millis() - lastPhReadTime >= 1000) { // Lê pH a cada 1 segundo
+  if (millis() - lastPhReadTime >= 1000) {
     lastPhReadTime = millis();
     readpH();
   }
@@ -229,23 +234,22 @@ void updateDisplay() {
 
     switch (currentState) {
         case MAIN: {
+            if (lastAlertState != pHBelowIdeal) {
+                lcd.clear(); // Limpa a tela na transição de/para o estado de alerta
+                lastAlertState = pHBelowIdeal;
+                lastDisplayedPH = -999.0; // Força redesenho
+            }
+
             if (pHBelowIdeal) {
-                if (lastAlertState != pHBelowIdeal) { lcd.clear(); } // Limpa só na transição para o alerta
                 lcd.setCursor(0, 0); lcd.print("** ALERTA: PH BAIXO **");
             } else {
-                if (lastAlertState != pHBelowIdeal) { lcd.clear(); } // Limpa só na transição de volta do alerta
                 const char spinner[] = {'|', '/', '-', '\\'};
                 char indicator = spinner[readingIndex % 4];
                 lcd.setCursor(0, 0); lcd.print("STATUS ATUAL "); lcd.print(indicator); lcd.print("      ");
             }
-            lastAlertState = pHBelowIdeal;
 
             float currentAveragePH = averagePH();
-            bool dataChanged = fabs(lastDisplayedPH - currentAveragePH) > 0.05 ||
-                               fabs(lastDisplayedTemp - temperature) > 0.2 ||
-                               fabs(lastDisplayedPIdeal - pHIdeal) > 0.05;
-
-            if (dataChanged) {
+            if (fabs(lastDisplayedPH - currentAveragePH) > 0.05 || fabs(lastDisplayedTemp - temperature) > 0.2 || fabs(lastDisplayedPIdeal - pHIdeal) > 0.05) {
                 lcd.setCursor(0, 1); lcd.print("PH Medio: "); lcd.print(currentAveragePH, 2); lcd.print("      ");
                 lcd.setCursor(0, 2); lcd.print("PH Inst.: "); lcd.print(pHValue, 2); lcd.print("      ");
                 lcd.setCursor(0, 3); lcd.print("T:"); lcd.print(temperature, 1); lcd.print((char)223); lcd.print("C "); lcd.print("Ideal:"); lcd.print(pHIdeal, 1); lcd.print("   ");
@@ -363,7 +367,7 @@ void handleCalibrateMode() { handleInitialCalibrationPrompt(); }
 bool waitForMenuConfirm() {
     lcd.setCursor(0, 2); lcd.print("Press MENU quando "); lcd.setCursor(0, 3); lcd.print("pronto             ");
     while (true) {
-        checkButtons();
+        wdt_reset(); checkButtons();
         if (menuPressed) { menuPressed = false; delay(120); return true; }
         delay(80);
     }
@@ -383,6 +387,7 @@ void handleCalibrateOnePoint() {
         lcd.clear(); lcd.print("CALIBRANDO...");
         float sum = 0;
         for (int i = 0; i < PH_READING_COUNT; i++) {
+            wdt_reset();
             int analogValue = analogRead(pHPin); float voltage = analogValue * (ADC_REF / ADC_MAX); sum += voltage;
             lcd.setCursor(0, 1); lcd.print("Leitura "); lcd.print(i + 1); lcd.print("/"); lcd.print(PH_READING_COUNT);
             lcd.setCursor(0, 2); lcd.print("Tensao: "); lcd.print(voltage, 3); lcd.print("V   ");
@@ -416,6 +421,7 @@ void handleCalibrateTwoPointFirst() {
         lcd.clear(); lcd.print("CALIBRANDO...");
         float sum = 0;
         for (int i = 0; i < PH_READING_COUNT; i++) {
+            wdt_reset();
             int analogValue = analogRead(pHPin); float voltage = analogValue * (ADC_REF / ADC_MAX); sum += voltage;
             lcd.setCursor(0, 1); lcd.print("Leitura "); lcd.print(i + 1); lcd.print("/"); lcd.print(PH_READING_COUNT);
             lcd.setCursor(0, 2); lcd.print("Tensao: "); lcd.print(voltage, 3); lcd.print("V   ");
@@ -441,6 +447,7 @@ void handleCalibrateTwoPointSecond() {
         lcd.clear(); lcd.print("CALIBRANDO...");
         float sum = 0;
         for (int i = 0; i < PH_READING_COUNT; i++) {
+            wdt_reset();
             int analogValue = analogRead(pHPin); float voltage = analogValue * (ADC_REF / ADC_MAX); sum += voltage;
             lcd.setCursor(0, 1); lcd.print("Leitura "); lcd.print(i + 1); lcd.print("/"); lcd.print(PH_READING_COUNT);
             lcd.setCursor(0, 2); lcd.print("Tensao: "); lcd.print(voltage, 3); lcd.print("V   ");
