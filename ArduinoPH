@@ -131,7 +131,16 @@ void readpH() {
   float slopeT = settings.pHSlope * (tempK / KELVIN_25);
   if (fabs(slopeT) < 1e-6) return;
   float pHcalc = 7.0 + (voltage - settings.pHOffset) / slopeT;
-  if (!isnan(pHcalc)) { pHValue = pHcalc; pHReadings[readingIndex] = pHValue; readingIndex = (readingIndex + 1) % PH_READING_COUNT; }
+
+  if (!isnan(pHcalc) && pHcalc >= 0.0 && pHcalc <= 14.0) {
+    pHValue = pHcalc;
+    pHReadings[readingIndex] = pHValue;
+    readingIndex = (readingIndex + 1) % PH_READING_COUNT;
+  } else {
+    // Se o valor for inválido (ex: -1, 15), registra o erro mas não atualiza o buffer de leituras.
+    // Isso evita que um valor absurdo afete a média ou o controle da bomba.
+    logError("Leitura de pH calculada fora da faixa (0-14). Valor: " + String(pHcalc));
+  }
 }
 
 // --- Lógica de Controle ---
