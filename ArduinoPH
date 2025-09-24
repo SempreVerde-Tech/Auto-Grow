@@ -23,6 +23,7 @@ OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 const int upButton = 3, downButton = 4, menuButton = 5, pumpPin = 6, ledPin = 7;
 
+const float TEMP_OFFSET_CELSIUS = 0.6; // Ajuste de calibração para o sensor de temperatura
 const float KELVIN_25 = 298.15;
 const int PH_READING_COUNT = 10;
 const unsigned long pumpDuration = 10000, waitAfterPump = 300000, timeout = 30000, startupTime = 15000;
@@ -116,7 +117,7 @@ void readTemperature() {
     if (errorCount > 5) { logError("Falha no sensor de Temp!"); currentState = SENSOR_ERROR; }
   } else {
     errorCount = 0;
-    if (t > -40 && t < 125) temperature = t;
+    if (t > -40 && t < 125) temperature = t + TEMP_OFFSET_CELSIUS;
   }
 }
 void readpH() {
