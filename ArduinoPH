@@ -29,7 +29,7 @@ const unsigned long pumpDuration = 10000, waitAfterPump = 300000, timeout = 3000
 
 const bool BUTTON_LOGIC_INVERTED = true;
 const float MIN_VALID_SLOPE = -0.080, MAX_VALID_SLOPE = -0.040;
-const float DEFAULT_PH_IDEAL = 6.5, DEFAULT_PH_OFFSET = 2.5, DEFAULT_PH_SLOPE = -0.057;
+const float DEFAULT_PH_IDEAL = 6.5, DEFAULT_PH_OFFSET = 2.8, DEFAULT_PH_SLOPE = -0.057;
 
 const float calibpH4 = 4.01, calibpH7 = 7.01, calibpH10 = 10.01;
 
