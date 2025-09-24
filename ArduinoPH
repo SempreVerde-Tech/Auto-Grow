@@ -255,6 +255,25 @@ void handleCalibrateTwoPointSecond(ButtonPress b) {
 float averagePH() { float sorted[PH_READING_COUNT]; for(int i=0;i<PH_READING_COUNT;i++) sorted[i]=pHReadings[i]; for(int i=0;i<PH_READING_COUNT-1;i++) for(int j=0;j<PH_READING_COUNT-i-1;j++) if(sorted[j]>sorted[j+1]){float t=sorted[j];sorted[j]=sorted[j+1];sorted[j+1]=t;} float sum=0; for(int i=2;i<PH_READING_COUNT-2;i++) sum+=sorted[i]; return sum/(float)(PH_READING_COUNT-4); }
 bool isPHStable() { float minVal=pHReadings[0],maxVal=pHReadings[0]; for(int i=1;i<PH_READING_COUNT;i++){if(pHReadings[i]<minVal)minVal=pHReadings[i];if(pHReadings[i]>maxVal)maxVal=pHReadings[i];} return (maxVal-minVal)<=0.2; }
 uint16_t calculateChecksum(const Settings& s) { uint16_t cs=0; const byte*p=(const byte*)&s; for(size_t i=0;i<sizeof(s)-sizeof(s.checksum);++i) cs+=*p++; return cs; }
-void loadSettings() { EEPROM.get(0, settings); if (settings.checksum!=calculateChecksum(settings)) { logError("Checksum invalido! Carregando padroes."); settings.pHIdeal=DEFAULT_PH_IDEAL; settings.pHOffset=DEFAULT_PH_OFFSET; settings.pHSlope=DEFAULT_PH_SLOPE; saveSettings(); } }
-void saveSettings() { settings.checksum = calculateChecksum(settings); EEPROM.put(0, settings); }
-void logError(const char* message) { Serial.print("ERRO: "); Serial.println(message); }
+
+void loadSettings() {
+  EEPROM.get(0, settings);
+  // Se o checksum for inválido OU se o slope for 0 (indica EEPROM vazia), carrega os padrões.
+  if (settings.checksum != calculateChecksum(settings) || fabs(settings.pHSlope) < 1e-6) {
+    logError("Checksum invalido ou EEPROM vazia! Carregando padroes.");
+    settings.pHIdeal = DEFAULT_PH_IDEAL;
+    settings.pHOffset = DEFAULT_PH_OFFSET;
+    settings.pHSlope = DEFAULT_PH_SLOPE;
+    saveSettings();
+  }
+}
+
+void saveSettings() {
+  settings.checksum = calculateChecksum(settings);
+  EEPROM.put(0, settings);
+}
+
+void logError(const char* message) {
+  Serial.print("ERRO: ");
+  Serial.println(message);
+}
