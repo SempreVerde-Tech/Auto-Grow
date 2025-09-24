@@ -33,7 +33,7 @@ const float calibpH4 = 4.01, calibpH7 = 7.01, calibpH10 = 10.01;
 // --- Estruturas e Enums ---
 struct Settings { float pHIdeal; float pHOffset; float pHSlope; uint16_t checksum; };
 Settings settings;
-enum State { STARTUP, MAIN, MENU, ADJUST_PH, CALIBRATE, CALIBRATE_MODE, CALIBRATE_ONE_POINT, CALIBRATE_TWO_POINT_FIRST, CALIBRATE_TWO_POINT_SECOND, INITIAL_CALIBRATION_PROMPT, SENSOR_ERROR };
+enum State { STARTUP, MAIN, MENU, ADJUST_PH, CALIBRATE, CALIBRATE_MODE, CALIBRATE_ONE_POINT, CALIBRATE_TWO_POINT_FIRST, CALIBRATE_TWO_POINT_SECOND, INITIAL_CALIBRATION_PROMPT, SENSOR_ERROR, PH_SENSOR_ERROR };
 State currentState = STARTUP;
 enum ButtonPress { BTN_NONE, BTN_UP, BTN_DOWN, BTN_MENU };
 
@@ -70,7 +70,7 @@ void setup() {
 
 void loop() {
   wdt_reset();
-  if (currentState != SENSOR_ERROR) {
+  if (currentState != SENSOR_ERROR && currentState != PH_SENSOR_ERROR) {
     if (millis() - lastTempReadTime >= 2000) { lastTempReadTime = millis(); readTemperature(); }
     if (millis() - lastPhReadTime >= 1000) { lastPhReadTime = millis(); readpH(); }
   }
@@ -87,6 +87,7 @@ void loop() {
     case CALIBRATE_TWO_POINT_SECOND: handleCalibrateTwoPointSecond(button); break;
     case INITIAL_CALIBRATION_PROMPT: handleInitialCalibrationPrompt(button); break;
     case SENSOR_ERROR: break;
+    case PH_SENSOR_ERROR: break;
   }
   if (currentState == MAIN) controlPump();
   updateDisplay();
@@ -107,12 +108,19 @@ void readTemperature() {
 }
 void readpH() {
   int analogValue = analogRead(pHPin);
+
+  if (analogValue < 10 || analogValue > 1013) { // Leituras próximas de 0V ou 5V
+    logError("Leitura do sensor de pH fora da faixa. Verifique a conexao.");
+    currentState = PH_SENSOR_ERROR;
+    return;
+  }
+
   float voltage = analogValue * (ADC_REF / ADC_MAX);
   if (fabs(settings.pHSlope) < 1e-6) return;
   float tempK = temperature + 273.15;
   float slopeT = settings.pHSlope * (tempK / KELVIN_25);
   if (fabs(slopeT) < 1e-6) return;
-  float pHcalc = (voltage - settings.pHOffset) / slopeT;
+  float pHcalc = 7.0 + (voltage - settings.pHOffset) / slopeT;
   if (!isnan(pHcalc)) { pHValue = pHcalc; pHReadings[readingIndex] = pHValue; readingIndex = (readingIndex + 1) % PH_READING_COUNT; }
 }
 
@@ -136,6 +144,12 @@ void updateDisplay() {
     switch (currentState) {
         case STARTUP: lcd.setCursor(0, 1); lcd.print("Estabilizando..."); break;
         case SENSOR_ERROR: lcd.setCursor(0, 0); lcd.print("ERRO DE SENSOR!"); lcd.setCursor(0, 1); lcd.print("Verifique conexoes."); lcd.setCursor(0, 2); lcd.print("Sistema reiniciara"); lcd.setCursor(0, 3); lcd.print("em breve..."); break;
+        case PH_SENSOR_ERROR:
+            lcd.setCursor(0, 0); lcd.print("ERRO NO SENSOR DE PH");
+            lcd.setCursor(0, 1); lcd.print("Verifique a conexao");
+            lcd.setCursor(0, 2); lcd.print("e reinicie o sistema");
+            lcd.setCursor(0, 3); lcd.print("para continuar.");
+            break;
         case MAIN: {
             bool alertStateChanged = lastAlertState != pHBelowIdeal;
             if (alertStateChanged) { lcd.clear(); lastAlertState = pHBelowIdeal; lastDisplayedPH = -999.0; }
@@ -165,7 +179,7 @@ ButtonPress checkButtons() {
         if (digitalRead(downButton) == PRESSED_STATE) { lastPressTime = millis(); return BTN_DOWN; }
         if (digitalRead(menuButton) == PRESSED_STATE) { lastPressTime = millis(); lastButtonPress = millis(); return BTN_MENU; }
     }
-    if (currentState != MAIN && currentState != SENSOR_ERROR && millis() - lastButtonPress > timeout) { currentState = MAIN; }
+    if (currentState != MAIN && currentState != SENSOR_ERROR && currentState != PH_SENSOR_ERROR && millis() - lastButtonPress > timeout) { currentState = MAIN; }
     return BTN_NONE;
 }
 
@@ -187,7 +201,7 @@ void handleCalibrateOnePoint(ButtonPress b) {
         float avgVoltage = sum / (float)PH_READING_COUNT; float targetpH = 0;
         switch (calibSolutionIndex) { case 0: targetpH = calibpH4; break; case 1: targetpH = calibpH7; break; case 2: targetpH = calibpH10; break; }
         if (fabs(settings.pHSlope) < 1e-6) { logError("Slope invalido, calibre com 2 pontos."); lcd.clear(); lcd.print("Slope invalido."); lcd.setCursor(0,1); lcd.print("Faca 2 pontos"); delay(2500); }
-        else { settings.pHOffset = avgVoltage - (settings.pHSlope * targetpH); saveSettings(); lcd.clear(); lcd.print("Calibracao"); lcd.setCursor(0, 1); lcd.print("Concluida!"); delay(1500); }
+        else { settings.pHOffset = avgVoltage - (settings.pHSlope * (targetpH - 7.0)); saveSettings(); lcd.clear(); lcd.print("Calibracao"); lcd.setCursor(0, 1); lcd.print("Concluida!"); delay(1500); }
         currentState = MAIN;
     }
 }
@@ -221,7 +235,7 @@ void handleCalibrateTwoPointSecond(ButtonPress b) {
         else {
             float newSlope = (secondCalibValue - firstCalibValue) / denom;
             if (newSlope > MAX_VALID_SLOPE || newSlope < MIN_VALID_SLOPE) { logError("Slope de calibracao invalido."); lcd.clear(); lcd.print("Erro de Calibracao"); lcd.setCursor(0, 1); lcd.print("Slope invalido!"); delay(3000); }
-            else { settings.pHSlope = newSlope; settings.pHOffset = firstCalibValue - (settings.pHSlope * targetpH1); saveSettings(); lcd.clear(); lcd.print("Calibracao"); lcd.setCursor(0, 1); lcd.print("Concluida!"); delay(1500); }
+            else { settings.pHSlope = newSlope; settings.pHOffset = firstCalibValue - (settings.pHSlope * (targetpH1 - 7.0)); saveSettings(); lcd.clear(); lcd.print("Calibracao"); lcd.setCursor(0, 1); lcd.print("Concluida!"); delay(1500); }
         }
         currentState = MAIN;
     }
