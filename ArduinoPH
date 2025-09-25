@@ -680,6 +680,12 @@ void loadSettings() {
   // Se o checksum for inválido OU se o slope for 0 (indica EEPROM vazia), carrega os padrões.
   if (settings.checksum != calculateChecksum(settings) || fabs(settings.pHSlope) < 1e-6) {
     logError("Checksum invalido ou EEPROM vazia! Carregando padroes.");
+    lcd.clear();
+    lcd.setCursor(0, 0); lcd.print("CONFIG. INVALIDA");
+    lcd.setCursor(0, 1); lcd.print("CARREGANDO PADROES");
+    delay(3500);
+    lcd.clear();
+
     settings.pHIdeal = DEFAULT_PH_IDEAL;
     settings.pHOffset = DEFAULT_PH_OFFSET;
     settings.pHSlope = DEFAULT_PH_SLOPE;
