@@ -1,14 +1,13 @@
 /*
   ================================================================================================
-  == FIRMWARE DE CONTROLE DE PH - VERSÃO PROFISSIONAL 5.0                                       ==
+  == FIRMWARE DE CONTROLE DE PH - VERSÃO PROFISSIONAL 5.0 OTIMIZADA                            ==
   ================================================================================================
   Autor: Jules
   Data da Versão: 2024-09-25
 
   Descrição:
   Este firmware oferece um controle robusto e preciso do pH para sistemas automatizados.
-  Foi desenvolvido para ser flexível e adaptável a diferentes componentes de hardware,
-  especialmente sensores de pH com características variadas.
+  Versão otimizada com as correções de segurança e simplificação da configuração de hardware.
 
   Funcionalidades Chave:
   - Leitura de pH e Temperatura: Utiliza um conversor ADC externo ADS1115 de alta precisão
@@ -58,7 +57,6 @@ const unsigned long pumpDuration = 10000;    // Duração que a bomba fica ligad
 const unsigned long waitAfterPump = 300000;  // Intervalo de espera após a bomba ser desligada (em ms).
 const unsigned long timeout = 30000;         // Timeout para sair dos menus de configuração (em ms).
 const unsigned long startupTime = 15000;     // Tempo de estabilização inicial do sistema (em ms).
-const bool BUTTON_LOGIC_INVERTED = true;     // Lógica dos botões (true se usam PULL-UP).
 
 // --- Valores Padrão para Configurações (Carregados se a EEPROM estiver vazia) ---
 const float DEFAULT_PH_IDEAL = 6.5;      // pH ideal padrão para a solução.
@@ -179,12 +177,19 @@ float performStableReading(int seconds) {
 void setup() {
   wdt_disable(); // Desabilita o watchdog temporariamente para o setup não ser interrompido.
   Serial.begin(9600); // Inicia a comunicação serial para debug.
-  pinMode(upButton, BUTTON_LOGIC_INVERTED ? INPUT : INPUT_PULLUP);
-  pinMode(downButton, BUTTON_LOGIC_INVERTED ? INPUT : INPUT_PULLUP);
-  pinMode(menuButton, BUTTON_LOGIC_INVERTED ? INPUT : INPUT_PULLUP);
-  pinMode(pumpPin, OUTPUT); pinMode(ledPin, OUTPUT);
-  digitalWrite(pumpPin, LOW); digitalWrite(ledPin, LOW);
-  lcd.init(); lcd.backlight();
+  
+  // CORREÇÃO APLICADA: Configuração simplificada dos botões (como na Versão 9.0)
+  pinMode(upButton, INPUT_PULLUP);
+  pinMode(downButton, INPUT_PULLUP);
+  pinMode(menuButton, INPUT_PULLUP);
+  
+  pinMode(pumpPin, OUTPUT); 
+  pinMode(ledPin, OUTPUT);
+  digitalWrite(pumpPin, LOW); 
+  digitalWrite(ledPin, LOW);
+  
+  lcd.init(); 
+  lcd.backlight();
   lcd.print("Iniciando sistema...");
 
   sensors.begin();
@@ -307,7 +312,7 @@ void controlPump() {
   
   if (!isPHStable()) return;
   
-  // NOTA: phAvg já foi calculado no início da função - não redeclarar!
+  // phAvg já foi calculado no início da função
   if (phAvg > settings.pHIdeal + 0.3 && !waitingAfterPump && !pumpActive) { 
     pumpActive = true; 
     digitalWrite(pumpPin, HIGH); 
@@ -477,24 +482,26 @@ void updateDisplay() {
  * @return O botão que foi pressionado (BTN_UP, BTN_DOWN, BTN_MENU) ou BTN_NONE.
  */
 ButtonPress checkButtons() {
-    const bool PRESSED_STATE = BUTTON_LOGIC_INVERTED ? HIGH : LOW; // Define o estado "pressionado"
+    // CORREÇÃO APLICADA: Lógica simplificada - botões usam PULL-UP (ativo em LOW)
     static unsigned long lastPressTime = 0; // Para o debounce
     const unsigned long DEBOUNCE_MS = 200;
+    
     if (millis() - lastPressTime > DEBOUNCE_MS) {
-        if (digitalRead(upButton) == PRESSED_STATE) { 
+        if (digitalRead(upButton) == LOW) { 
             lastPressTime = millis(); 
             return BTN_UP; 
         }
-        if (digitalRead(downButton) == PRESSED_STATE) { 
+        if (digitalRead(downButton) == LOW) { 
             lastPressTime = millis(); 
             return BTN_DOWN; 
         }
-        if (digitalRead(menuButton) == PRESSED_STATE) { 
+        if (digitalRead(menuButton) == LOW) { 
             lastPressTime = millis(); 
             lastButtonPress = millis(); 
             return BTN_MENU; 
         }
     }
+    
     if (currentState != MAIN && currentState != SENSOR_ERROR && millis() - lastButtonPress > timeout) { 
         currentState = MAIN; 
     }
@@ -585,7 +592,7 @@ void handleInitialCalibrationPrompt(ButtonPress b) {
 }
 
 void handleCalibrationConfirmSlope(ButtonPress b) {
-    // CORREÇÃO: Usa a variável global confirmIndex em vez de criar uma local
+    // CORREÇÃO: Usa a variável global confirmIndex corretamente
     if (b == BTN_UP || b == BTN_DOWN) {
         confirmIndex = !confirmIndex;
     }
@@ -618,8 +625,7 @@ void handleCalibrationConfirmSlope(ButtonPress b) {
  * Não salva nenhuma configuração, serve apenas para análise.
  */
 void handleSensorDiagnostic() {
-    // CORREÇÃO: Removida a declaração duplicada de variáveis no início da função
-    
+    // CORREÇÃO: Declaração correta das variáveis
     // Medição no Ponto 1 (pH 7)
     lcd.clear();
     lcd.print("DIAGNOSTICO: PONTO 1");
@@ -963,13 +969,13 @@ uint16_t calculateChecksum(const Settings& s) {
 
 /**
  * @brief Valida as configurações carregadas da EEPROM.
- * Verifica se os valores estão dentro de faixas razoáveis.
+ * CORREÇÃO MANTIDA: Validação segura que não permite slope zero (evita divisão por zero).
  * @return true se as configurações são válidas, false caso contrário.
  */
 bool validateSettings() {
     if (settings.pHIdeal < 0.0 || settings.pHIdeal > 14.0) return false;
     if (settings.minSlope >= settings.maxSlope) return false;
-    if (fabs(settings.pHSlope) < 0.001) return false; // Slope muito próximo de zero
+    if (fabs(settings.pHSlope) < 0.001) return false; // CORREÇÃO CRÍTICA MANTIDA: Não permite slope zero
     return true;
 }
 
