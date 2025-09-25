@@ -226,8 +226,7 @@ void loop() {
     case MAIN: handleMain(button); break;
     case MENU: handleMenu(button); break;
     case ADJUST_PH: handleAdjustPH(button); break;
-    case CALIBRATE: handleCalibrate(button); break;
-    case CALIBRATE_MODE: handleCalibrateMode(button); break;
+    case CALIBRATE_MENU: handleCalibrateMenu(button); break;
     case CALIBRATE_ONE_POINT: handleCalibrateOnePoint(button); break;
     case CALIBRATE_TWO_POINT_FIRST: handleCalibrateTwoPointFirst(button); break;
     case CALIBRATE_TWO_POINT_SECOND: handleCalibrateTwoPointSecond(button); break;
