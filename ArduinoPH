@@ -1,23 +1,13 @@
 /*
   ================================================================================================
-  == FIRMWARE DE CONTROLE DE PH - VERSÃO 8.0 FINAL                                              ==
+  == FIRMWARE DE CONTROLE DE PH - VERSÃO 9.0 FINAL E CORRIGIDA                                  ==
   ================================================================================================
   Autor: Jules
   Data da Versão: 2025-09-25
 
   Descrição:
   Versão final e profissional do firmware, corrigindo todos os bugs de compilação e lógica,
-  e incorporando todas as funcionalidades avançadas e de segurança solicitadas.
-
-  Funcionalidades Chave:
-  - Leitura via ADS1115: Comunicação correta com o ADC externo de alta precisão.
-  - Calibração Profissional: Compensada por temperatura e com rotinas de leitura estáveis.
-  - Menu Técnico Avançado: Permite diagnóstico de sonda e ajuste de limites de sensibilidade.
-  - Lógica de Calibração Flexível: Detecta sensores não-padrão e permite ao técnico forçar
-    a calibração de forma segura.
-  - Robustez e Segurança: Inclui Watchdog, validação de faixa de pH, trava de segurança para
-    a bomba e um sistema inteligente de recuperação de configurações da EEPROM.
-  - Estabilidade de Leitura: Usa uma média de 30 leituras para controle e calibração.
+  e incorporando todas as funcionalidades avançadas e de segurança solicitadas e revisadas.
 */
 
 // --- Bibliotecas ---
@@ -32,18 +22,14 @@
 // ================================================================================================
 // == SEÇÃO DE CONFIGURAÇÕES DE HARDWARE E CONSTANTES                                            ==
 // ================================================================================================
-
-// --- Objetos de Hardware ---
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 Adafruit_ADS1115 ads;
 
-// --- Pinos do Arduino ---
 #define ONE_WIRE_BUS 2
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 const int upButton = 3, downButton = 4, menuButton = 5, pumpPin = 6, ledPin = 7;
 
-// --- Constantes de Calibração e Operação ---
 const float TEMP_OFFSET_CELSIUS = 0.6;
 const float KELVIN_25 = 298.15;
 const int PH_READING_COUNT = 30;
@@ -54,20 +40,17 @@ const unsigned long timeout = 30000;
 const unsigned long startupTime = 15000;
 const bool BUTTON_LOGIC_INVERTED = true;
 
-// --- Valores Padrão para Configurações ---
 const float DEFAULT_PH_IDEAL = 6.5;
 const float DEFAULT_PH_OFFSET = 2.8;
 const float DEFAULT_PH_SLOPE = -0.057;
 const float DEFAULT_MIN_SLOPE = -0.200;
 const float DEFAULT_MAX_SLOPE = -0.040;
 
-// --- Valores de pH para as Soluções de Calibração ---
 const float calibpH4 = 4.01, calibpH7 = 7.01, calibpH10 = 10.01;
 
 // ================================================================================================
 // == SEÇÃO DE ESTRUTURAS DE DADOS E VARIÁVEIS GLOBAIS                                           ==
 // ================================================================================================
-
 struct Settings {
   float pHIdeal;
   float pHOffset;
@@ -103,7 +86,6 @@ bool lastAlertState = false;
 // ================================================================================================
 // == SEÇÃO DE PROTÓTIPOS DE FUNÇÕES                                                             ==
 // ================================================================================================
-
 void loadSettings();
 void saveSettings();
 void readTemperature();
@@ -135,7 +117,6 @@ bool validateSettings();
 // ================================================================================================
 // == SEÇÃO DE FUNÇÕES PRINCIPAIS (SETUP E LOOP)                                                 ==
 // ================================================================================================
-
 float performStableReading(int seconds) {
     float sum = 0;
     for (int i = 0; i < seconds; i++) {
@@ -152,12 +133,15 @@ float performStableReading(int seconds) {
 void setup() {
   wdt_disable();
   Serial.begin(9600);
-  pinMode(upButton, BUTTON_LOGIC_INVERTED ? INPUT : INPUT_PULLUP);
-  pinMode(downButton, BUTTON_LOGIC_INVERTED ? INPUT : INPUT_PULLUP);
-  pinMode(menuButton, BUTTON_LOGIC_INVERTED ? INPUT : INPUT_PULLUP);
-  pinMode(pumpPin, OUTPUT); pinMode(ledPin, OUTPUT);
-  digitalWrite(pumpPin, LOW); digitalWrite(ledPin, LOW);
-  lcd.init(); lcd.backlight();
+  pinMode(upButton, INPUT_PULLUP);
+  pinMode(downButton, INPUT_PULLUP);
+  pinMode(menuButton, INPUT_PULLUP);
+  pinMode(pumpPin, OUTPUT);
+  pinMode(ledPin, OUTPUT);
+  digitalWrite(pumpPin, LOW);
+  digitalWrite(ledPin, LOW);
+  lcd.init();
+  lcd.backlight();
   lcd.print("Iniciando sistema...");
 
   sensors.begin();
@@ -206,7 +190,6 @@ void loop() {
 // ================================================================================================
 // == SEÇÃO DE LEITURA DE SENSORES E CONTROLE DE ATUADORES                                       ==
 // ================================================================================================
-
 void readTemperature() {
   static int errorCount = 0;
   sensors.requestTemperatures();
@@ -281,7 +264,6 @@ void controlPump() {
 // ================================================================================================
 // == SEÇÃO DE INTERFACE COM O USUÁRIO (DISPLAY E BOTÕES)                                        ==
 // ================================================================================================
-
 void updateDisplay() {
     if (lastDisplayState != currentState) {
         lcd.clear();
@@ -293,8 +275,7 @@ void updateDisplay() {
     }
     switch (currentState) {
         case STARTUP:
-            lcd.setCursor(0, 1);
-            lcd.print("Estabilizando...");
+            lcd.setCursor(0, 1); lcd.print("Estabilizando...");
             break;
         case SENSOR_ERROR:
             lcd.setCursor(0, 0); lcd.print("ERRO DE SENSOR!");
@@ -371,7 +352,6 @@ ButtonPress checkButtons() {
 // ================================================================================================
 // == SEÇÃO DE GERENCIAMENTO DE ESTADOS (HANDLERS)                                               ==
 // ================================================================================================
-
 void handleStartup() {
     if (millis() - startupEntryTime > startupTime) {
         if (EEPROM.read(0) != 123) {
@@ -467,8 +447,7 @@ void handleCalibrationConfirmSlope(ButtonPress b) {
 void handleSensorDiagnostic() {
     lcd.clear();
     lcd.print("DIAGNOSTICO: PONTO 1");
-    lcd.setCursor(0, 1);
-    lcd.print("Mergulhe em pH 7.01");
+    lcd.setCursor(0, 1); lcd.print("Mergulhe em pH 7.01");
     waitForMenuConfirm();
     lcd.clear();
     lcd.print("Lendo tensao...");
@@ -476,10 +455,8 @@ void handleSensorDiagnostic() {
 
     lcd.clear();
     lcd.print("DIAGNOSTICO: PONTO 2");
-    lcd.setCursor(0, 1);
-    lcd.print("Lave e mergulhe em");
-    lcd.setCursor(0, 2);
-    lcd.print("pH 4.01");
+    lcd.setCursor(0, 1); lcd.print("Lave e mergulhe em");
+    lcd.setCursor(0, 2); lcd.print("pH 4.01");
     waitForMenuConfirm();
     lcd.clear();
     lcd.print("Lendo tensao...");
@@ -503,7 +480,6 @@ void handleSensorDiagnostic() {
 void handleAdjustSlopeLimits(ButtonPress b) {
     static int slopeMenuIndex = 0;
     static bool editing = false;
-
     if (editing) {
         if (slopeMenuIndex == 0) {
             if (b == BTN_UP) settings.minSlope -= 0.001;
@@ -525,7 +501,6 @@ void handleAdjustSlopeLimits(ButtonPress b) {
             }
         }
     }
-
     lcd.setCursor(0, 0); lcd.print("AJUSTAR LIMITES SLOPE");
     lcd.setCursor(0, 1); if (slopeMenuIndex == 0) lcd.print(editing ? ">>" : "> "); else lcd.print("  ");
     lcd.print("Min: "); lcd.print(settings.minSlope, 4);
@@ -654,7 +629,6 @@ void handleCalibrateTwoPointSecond(ButtonPress b) {
 // ================================================================================================
 // == SEÇÃO DE FUNÇÕES AUXILIARES                                                                ==
 // ================================================================================================
-
 float averagePH() {
     float sorted[PH_READING_COUNT];
     for(int i=0;i<PH_READING_COUNT;i++) sorted[i]=pHReadings[i];
