@@ -52,7 +52,8 @@ const int upButton = 3, downButton = 4, menuButton = 5, pumpPin = 6, ledPin = 7;
 // --- Constantes de Calibração e Operação ---
 const float TEMP_OFFSET_CELSIUS = 0.6; // (AJUSTÁVEL) Offset para calibrar o sensor de temperatura.
 const float KELVIN_25 = 298.15;        // Temperatura de referência (25°C) em Kelvin, para cálculos de pH.
-const int PH_READING_COUNT = 10;       // Tamanho do buffer de leituras de pH para calcular a média.
+const int PH_READING_COUNT = 30;       // Tamanho do buffer de leituras de pH para calcular a média.
+const int CALIBRATION_READING_SECONDS = 30; // Duração da leitura para calibração.
 const unsigned long pumpDuration = 10000;    // Duração que a bomba fica ligada (em milissegundos).
 const unsigned long waitAfterPump = 300000;  // Intervalo de espera após a bomba ser desligada (em ms).
 const unsigned long timeout = 30000;         // Timeout para sair dos menus de configuração (em ms).
@@ -141,6 +142,7 @@ void handleSensorDiagnostic();
 void handleAdjustSlopeLimits(ButtonPress);
 
 // --- Funções Auxiliares ---
+float performStableReading(int seconds);
 bool waitForMenuConfirm();
 void logError(const char*);
 uint16_t calculateChecksum(const Settings&);
@@ -148,6 +150,25 @@ uint16_t calculateChecksum(const Settings&);
 // ================================================================================================
 // == SEÇÃO DE FUNÇÕES PRINCIPAIS (SETUP E LOOP)                                                 ==
 // ================================================================================================
+
+/**
+ * @brief Realiza uma série de leituras de tensão para obter um valor médio estável.
+ * Usado nos processos de calibração e diagnóstico.
+ * @param seconds O número de segundos (e leituras) a serem feitas.
+ * @return A tensão média calculada.
+ */
+float performStableReading(int seconds) {
+    float sum = 0;
+    for (int i = 0; i < seconds; i++) {
+        wdt_reset();
+        float volt = ads.computeVolts(ads.readADC_SingleEnded(0));
+        sum += volt;
+        lcd.setCursor(0, 1); lcd.print("Lendo... "); lcd.print(i + 1); lcd.print("/"); lcd.print(seconds); lcd.print("s");
+        lcd.setCursor(0, 2); lcd.print("Tensao: "); lcd.print(volt, 4); lcd.print("V ");
+        delay(1000);
+    }
+    return sum / (float)seconds;
+}
 
 /**
  * @brief Função de configuração inicial.
@@ -450,13 +471,7 @@ void handleSensorDiagnostic() {
     waitForMenuConfirm();
     lcd.clear();
     lcd.print("Lendo tensao...");
-    float sum = 0;
-    for (int i = 0; i < PH_READING_COUNT; i++) {
-        wdt_reset();
-        sum += ads.computeVolts(ads.readADC_SingleEnded(0));
-        delay(250);
-    }
-    v_ph7 = sum / PH_READING_COUNT;
+    float v_ph7 = performStableReading(30);
 
     // Medição no Ponto 2 (pH 4)
     lcd.clear();
@@ -468,13 +483,7 @@ void handleSensorDiagnostic() {
     waitForMenuConfirm();
     lcd.clear();
     lcd.print("Lendo tensao...");
-    sum = 0;
-    for (int i = 0; i < PH_READING_COUNT; i++) {
-        wdt_reset();
-        sum += ads.computeVolts(ads.readADC_SingleEnded(0));
-        delay(250);
-    }
-    v_ph4 = sum / PH_READING_COUNT;
+    float v_ph4 = performStableReading(30);
 
     // Cálculo e Exibição do Resultado
     readTemperature();
@@ -570,9 +579,9 @@ void handleCalibrateOnePoint(ButtonPress b) {
     lcd.setCursor(0, 0); lcd.print("CALIBRAR: 1 PONTO  "); lcd.setCursor(0, 1); lcd.print(calibSolutionIndex == 0 ? "> Solucao 4.01" : "  Solucao 4.01"); lcd.setCursor(0, 2); lcd.print(calibSolutionIndex == 1 ? "> Solucao 7.01" : "  Solucao 7.01"); lcd.setCursor(0, 3); lcd.print(calibSolutionIndex == 2 ? "> Solucao 10.01" : "  Solucao 10.01");
     if (b == BTN_UP) calibSolutionIndex = (calibSolutionIndex - 1 + 3) % 3; else if (b == BTN_DOWN) calibSolutionIndex = (calibSolutionIndex + 1) % 3; else if (b == BTN_MENU) {
         lcd.clear(); lcd.print("Mergulhe a sonda"); lcd.setCursor(0, 1); lcd.print("na solucao e espere"); waitForMenuConfirm(); lcd.clear(); lcd.print("CALIBRANDO...");
-        float sum = 0; for (int i = 0; i < PH_READING_COUNT; i++) { wdt_reset(); float volt = ads.computeVolts(ads.readADC_SingleEnded(0)); sum += volt; lcd.setCursor(0, 1); lcd.print("Leitura "); lcd.print(i + 1); lcd.print("/"); lcd.print(PH_READING_COUNT); lcd.setCursor(0, 2); lcd.print("Tensao: "); lcd.print(volt, 3); lcd.print("V   "); delay(250); }
+        float avgVoltage = performStableReading(CALIBRATION_READING_SECONDS);
         readTemperature(); // Garante que a temperatura está atualizada
-        float avgVoltage = sum / (float)PH_READING_COUNT; float targetpH = 0;
+        float targetpH = 0;
         switch (calibSolutionIndex) { case 0: targetpH = calibpH4; break; case 1: targetpH = calibpH7; break; case 2: targetpH = calibpH10; break; }
         if (fabs(settings.pHSlope) < 1e-6) { logError("Slope invalido, calibre com 2 pontos."); lcd.clear(); lcd.print("Slope invalido."); lcd.setCursor(0,1); lcd.print("Faca 2 pontos"); delay(2500); }
         else {
@@ -590,8 +599,7 @@ void handleCalibrateTwoPointFirst(ButtonPress b) {
     if (b == BTN_UP) calibSolutionIndex = (calibSolutionIndex - 1 + 3) % 3; else if (b == BTN_DOWN) calibSolutionIndex = (calibSolutionIndex + 1) % 3; else if (b == BTN_MENU) {
         selectedCalibPoint = calibSolutionIndex;
         lcd.clear(); lcd.print("Mergulhe a sonda"); lcd.setCursor(0, 1); lcd.print("na solucao e espere"); waitForMenuConfirm(); lcd.clear(); lcd.print("CALIBRANDO...");
-        float sum = 0; for (int i = 0; i < PH_READING_COUNT; i++) { wdt_reset(); float volt = ads.computeVolts(ads.readADC_SingleEnded(0)); sum += volt; lcd.setCursor(0, 1); lcd.print("Leitura "); lcd.print(i + 1); lcd.print("/"); lcd.print(PH_READING_COUNT); lcd.setCursor(0, 2); lcd.print("Tensao: "); lcd.print(volt, 3); lcd.print("V   "); delay(250); }
-        firstCalibValue = sum / (float)PH_READING_COUNT;
+        firstCalibValue = performStableReading(CALIBRATION_READING_SECONDS);
         lcd.clear(); lcd.print("Primeiro ponto"); lcd.setCursor(0, 1); lcd.print("calibrado!"); delay(1200);
         currentState = CALIBRATE_TWO_POINT_SECOND; calibSolutionIndex = (selectedCalibPoint + 1) % 3;
     }
@@ -605,8 +613,7 @@ void handleCalibrateTwoPointSecond(ButtonPress b) {
     lcd.setCursor(0, 3); lcd.print((calibSolutionIndex == 2 && selectedCalibPoint != 2) ? "> Solucao 10.01" : "  Solucao 10.01");
     if (b == BTN_MENU) {
         lcd.clear(); lcd.print("Mergulhe a sonda"); lcd.setCursor(0, 1); lcd.print("na solucao e espere"); waitForMenuConfirm(); lcd.clear(); lcd.print("CALIBRANDO...");
-        float sum = 0; for (int i = 0; i < PH_READING_COUNT; i++) { wdt_reset(); float volt = ads.computeVolts(ads.readADC_SingleEnded(0)); sum += volt; lcd.setCursor(0, 1); lcd.print("Leitura "); lcd.print(i + 1); lcd.print("/"); lcd.print(PH_READING_COUNT); lcd.setCursor(0, 2); lcd.print("Tensao: "); lcd.print(volt, 3); lcd.print("V   "); delay(250); }
-        float secondCalibValue = sum / (float)PH_READING_COUNT;
+        float secondCalibValue = performStableReading(CALIBRATION_READING_SECONDS);
         float targetpH1 = 0, targetpH2 = 0;
         switch (selectedCalibPoint) { case 0: targetpH1 = calibpH4; break; case 1: targetpH1 = calibpH7; break; case 2: targetpH1 = calibpH10; break; }
         switch (calibSolutionIndex) { case 0: targetpH2 = calibpH4; break; case 1: targetpH2 = calibpH7; break; case 2: targetpH2 = calibpH10; break; }
