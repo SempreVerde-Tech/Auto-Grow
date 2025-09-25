@@ -230,8 +230,11 @@ void loop() {
     case CALIBRATE_ONE_POINT: handleCalibrateOnePoint(button); break;
     case CALIBRATE_TWO_POINT_FIRST: handleCalibrateTwoPointFirst(button); break;
     case CALIBRATE_TWO_POINT_SECOND: handleCalibrateTwoPointSecond(button); break;
+    case CALIBRATION_CONFIRM_SLOPE: handleCalibrationConfirmSlope(button); break;
+    case TECH_MENU: handleTechMenu(button); break;
+    case ADJUST_SLOPE_LIMITS: handleAdjustSlopeLimits(button); break;
     case INITIAL_CALIBRATION_PROMPT: handleInitialCalibrationPrompt(button); break;
-    case SENSOR_ERROR: break;
+    case SENSOR_ERROR: break; // Em caso de erro, não faz nada, apenas exibe a tela de erro.
   }
   if (currentState == MAIN) controlPump();
   updateDisplay();
@@ -275,7 +278,17 @@ void readpH() {
 
 // --- Lógica de Controle ---
 void controlPump() {
-  if (averagePH() < settings.pHIdeal - 0.3) {
+  float phAvg = averagePH();
+
+  // Trava de segurança: desliga a bomba se o pH estiver em uma faixa perigosa.
+  if (phAvg < 2.0 || phAvg > 12.0) {
+    digitalWrite(pumpPin, LOW);
+    pumpActive = false;
+    logError("pH fora da faixa segura! Bomba desativada.");
+    return;
+  }
+
+  if (phAvg < settings.pHIdeal - 0.3) {
     pHBelowIdeal = true; digitalWrite(ledPin, HIGH);
     if (pumpActive) { digitalWrite(pumpPin, LOW); pumpActive = false; waitingAfterPump = true; lastPumpTime = millis(); }
     return;
