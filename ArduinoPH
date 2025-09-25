@@ -294,7 +294,7 @@ void controlPump() {
     return;
   } else { pHBelowIdeal = false; digitalWrite(ledPin, LOW); }
   if (!isPHStable()) return;
-  float phAvg = averagePH();
+
   if (phAvg > settings.pHIdeal + 0.3 && !waitingAfterPump && !pumpActive) { pumpActive = true; digitalWrite(pumpPin, HIGH); lastPumpTime = millis(); }
   if (pumpActive && millis() - lastPumpTime >= pumpDuration) { digitalWrite(pumpPin, LOW); pumpActive = false; waitingAfterPump = true; lastPumpTime = millis(); }
   if (waitingAfterPump && millis() - lastPumpTime >= waitAfterPump) { waitingAfterPump = false; }
@@ -448,9 +448,6 @@ void handleCalibrateMenu(ButtonPress b) {
 void handleInitialCalibrationPrompt(ButtonPress b) { if (b == BTN_UP) calibMenuIndex = (calibMenuIndex - 1 + 3) % 3; else if (b == BTN_DOWN) calibMenuIndex = (calibMenuIndex + 1) % 3; else if (b == BTN_MENU) { switch (calibMenuIndex) { case 0: currentState = CALIBRATE_ONE_POINT; break; case 1: currentState = CALIBRATE_TWO_POINT_FIRST; break; case 2: currentState = MAIN; break; } } }
 
 void handleCalibrationConfirmSlope(ButtonPress b) {
-    // Implementação da tela de confirmação do slope
-    // (Esta função precisa ser declarada como protótipo no início do arquivo)
-    static int confirmIndex = 0; // 0 para Não, 1 para Sim
     if (b == BTN_UP || b == BTN_DOWN) {
         confirmIndex = !confirmIndex;
     }
@@ -464,6 +461,8 @@ void handleCalibrationConfirmSlope(ButtonPress b) {
             lcd.clear(); lcd.print("Calibracao"); lcd.setCursor(0, 1); lcd.print("Cancelada."); delay(1500);
         }
         currentState = MAIN;
+        confirmIndex = 0; // Reseta o índice para a próxima vez
+        menuIndex = 0;    // Reseta o índice do menu principal
     }
 }
 
@@ -473,8 +472,6 @@ void handleCalibrationConfirmSlope(ButtonPress b) {
  * Não salva nenhuma configuração, serve apenas para análise.
  */
 void handleSensorDiagnostic() {
-    float v_ph7, v_ph4, slope_diagnostic;
-
     // Medição no Ponto 1 (pH 7)
     lcd.clear();
     lcd.print("DIAGNOSTICO: PONTO 1");
@@ -639,8 +636,7 @@ void handleCalibrateTwoPointSecond(ButtonPress b) {
             float newSlope = (secondCalibValue - firstCalibValue) / denom;
             float newSlopeNormalized = newSlope / tempFactor;
 
-            // Variáveis temporárias para armazenar os novos valores de calibração
-            static float tempSlope, tempOffset;
+            // Usa as variáveis globais temporárias para armazenar os novos valores de calibração
             tempSlope = newSlopeNormalized;
             tempOffset = firstCalibValue - (newSlope * (targetpH1 - 7.0));
 
@@ -688,10 +684,21 @@ bool isPHStable() { float minVal=pHReadings[0],maxVal=pHReadings[0]; for(int i=1
  */
 uint16_t calculateChecksum(const Settings& s) { uint16_t cs=0; const byte*p=(const byte*)&s; for(size_t i=0;i<sizeof(s)-sizeof(s.checksum);++i) cs+=*p++; return cs; }
 
+/**
+ * @brief Valida se os valores de configuração carregados são lógicos e seguros.
+ * @return True se as configurações são válidas, false caso contrário.
+ */
+bool validateSettings() {
+    if (settings.pHIdeal < 0.0 || settings.pHIdeal > 14.0) return false;
+    if (settings.minSlope >= settings.maxSlope) return false;
+    if (fabs(settings.pHSlope) < 0.001 && fabs(settings.pHSlope) > 0.0) return false; // Permite 0 para estado inicial, mas não valores quase-zero.
+    return true;
+}
+
 void loadSettings() {
   EEPROM.get(0, settings);
-  // Se o checksum for inválido OU se o slope for 0 (indica EEPROM vazia), carrega os padrões.
-  if (settings.checksum != calculateChecksum(settings) || fabs(settings.pHSlope) < 1e-6) {
+  // Se o checksum for inválido, OU as configs não forem válidas, OU o slope for 0 (EEPROM vazia), carrega os padrões.
+  if (settings.checksum != calculateChecksum(settings) || !validateSettings()) {
     logError("Checksum invalido ou EEPROM vazia! Carregando padroes.");
     lcd.clear();
     lcd.setCursor(0, 0); lcd.print("CONFIG. INVALIDA");
