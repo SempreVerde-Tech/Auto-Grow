@@ -107,6 +107,7 @@ float lastDisplayedPH = -999.0, lastDisplayedTemp = -999.0, lastDisplayedPIdeal 
 float tempSlope = 0, tempOffset = 0; // Variáveis globais temporárias para o processo de calibração
 int confirmIndex = 0; // Variável para os menus de confirmação (0: Não, 1: Sim)
 bool lastAlertState = false;
+bool defaultsWereLoaded = false; // Adicionado: Flag para indicar se os padrões foram carregados
 
 // ================================================================================================
 // == SEÇÃO DE PROTÓTIPOS DE FUNÇÕES                                                             ==
@@ -476,36 +477,74 @@ void updateDisplay() {
 }
 
 /**
- * @brief Verifica o estado dos botões.
- * Inclui lógica de debounce para evitar múltiplas leituras de um único aperto.
- * Também gerencia o acesso ao Menu Técnico com um toque longo.
+ * @brief Verifica o estado dos botões com debounce e detecção de transição.
+ * Esta versão corrigida detecta apenas o momento em que o botão é pressionado (borda de descida),
+ * evitando múltiplos registros enquanto o botão é segurado.
  * @return O botão que foi pressionado (BTN_UP, BTN_DOWN, BTN_MENU) ou BTN_NONE.
  */
 ButtonPress checkButtons() {
-    // CORREÇÃO APLICADA: Lógica simplificada - botões usam PULL-UP (ativo em LOW)
-    static unsigned long lastPressTime = 0; // Para o debounce
-    const unsigned long DEBOUNCE_MS = 200;
+    // Lógica de debounce robusta que detecta a transição do botão.
+    static int up_btn_state = HIGH;
+    static int down_btn_state = HIGH;
+    static int menu_btn_state = HIGH;
     
-    if (millis() - lastPressTime > DEBOUNCE_MS) {
-        if (digitalRead(upButton) == LOW) { 
-            lastPressTime = millis(); 
-            return BTN_UP; 
+    static int last_up_btn_state = HIGH;
+    static int last_down_btn_state = HIGH;
+    static int last_menu_btn_state = HIGH;
+
+    static unsigned long last_debounce_time = 0;
+    const unsigned long DEBOUNCE_DELAY = 50;
+
+    ButtonPress current_press = BTN_NONE;
+
+    int up_reading = digitalRead(upButton);
+    int down_reading = digitalRead(downButton);
+    int menu_reading = digitalRead(menuButton);
+
+    // Se o estado de leitura mudou, reseta o timer de debounce
+    if (up_reading != last_up_btn_state || down_reading != last_down_btn_state || menu_reading != last_menu_btn_state) {
+        last_debounce_time = millis();
+    }
+
+    // Se o estado permaneceu estável pelo tempo de debounce...
+    if ((millis() - last_debounce_time) > DEBOUNCE_DELAY) {
+        // ... e o estado do botão mudou de não pressionado para pressionado...
+        if (up_reading != up_btn_state) {
+            up_btn_state = up_reading;
+            if (up_btn_state == LOW) {
+                current_press = BTN_UP;
+                lastButtonPress = millis(); // Reseta o timer de inatividade
+            }
         }
-        if (digitalRead(downButton) == LOW) { 
-            lastPressTime = millis(); 
-            return BTN_DOWN; 
+        if (down_reading != down_btn_state) {
+            down_btn_state = down_reading;
+            if (down_btn_state == LOW) {
+                current_press = BTN_DOWN;
+                lastButtonPress = millis();
+            }
         }
-        if (digitalRead(menuButton) == LOW) { 
-            lastPressTime = millis(); 
-            lastButtonPress = millis(); 
-            return BTN_MENU; 
+        if (menu_reading != menu_btn_state) {
+            menu_btn_state = menu_reading;
+            if (menu_btn_state == LOW) {
+                current_press = BTN_MENU;
+                lastButtonPress = millis();
+            }
         }
     }
-    
-    if (currentState != MAIN && currentState != SENSOR_ERROR && millis() - lastButtonPress > timeout) { 
-        currentState = MAIN; 
+
+    // Salva o estado de leitura atual para a próxima iteração
+    last_up_btn_state = up_reading;
+    last_down_btn_state = down_reading;
+    last_menu_btn_state = menu_reading;
+
+    // Gerencia o timeout de inatividade para voltar à tela principal
+    if (currentState != MAIN && currentState != STARTUP && currentState != SENSOR_ERROR) {
+        if (millis() - lastButtonPress > timeout) {
+            currentState = MAIN;
+        }
     }
-    return BTN_NONE;
+
+    return current_press;
 }
 
 // ================================================================================================
@@ -514,33 +553,48 @@ ButtonPress checkButtons() {
 // Cada função 'handle' é responsável pela lógica de uma tela ou menu específico.
 
 /** @brief Gerencia a tela de inicialização. */
-void handleStartup() { 
-    if (millis() - startupEntryTime > startupTime) { 
-        if (EEPROM.read(0) != 123) { 
-            currentState = INITIAL_CALIBRATION_PROMPT; 
-            EEPROM.write(0, 123); 
-        } else { 
-            currentState = MAIN; 
-        } 
-    } 
+void handleStartup() {
+    if (millis() - startupEntryTime > startupTime) {
+        // A decisão de calibrar agora é baseada na flag 'defaultsWereLoaded',
+        // que é definida em 'loadSettings' se a EEPROM estiver inválida.
+        if (defaultsWereLoaded) {
+            currentState = INITIAL_CALIBRATION_PROMPT;
+        } else {
+            currentState = MAIN;
+        }
+    }
 }
 
 /** @brief Gerencia a tela principal, incluindo o acesso ao menu principal e ao menu técnico. */
 void handleMain(ButtonPress b) {
-    static unsigned long menuButtonPressTime = 0; // Armazena o tempo que o botão de menu foi pressionado.
+    static unsigned long menuButtonPressTime = 0;
+    static bool menuButtonWasPressed = false;
+
+    // Um pressionamento acaba de ser detectado por checkButtons
     if (b == BTN_MENU) {
         menuButtonPressTime = millis();
+        menuButtonWasPressed = true;
     }
-    if (digitalRead(menuButton) == LOW && menuButtonPressTime > 0) {
-        if (millis() - menuButtonPressTime > 2000) { // Se o botão for segurado por 2s
-            currentState = TECH_MENU;
-            menuButtonPressTime = 0;
+
+    // Agora, gerenciamos o estado com base em se o botão ainda está pressionado ou foi solto.
+    // Esta parte é executada em cada ciclo do loop após o pressionamento inicial.
+    if (menuButtonWasPressed) {
+        // Verifica se o botão ainda está sendo pressionado
+        if (digitalRead(menuButton) == LOW) {
+            // Verifica se a duração do pressionamento longo foi atingida
+            if (millis() - menuButtonPressTime > 2000) {
+                currentState = TECH_MENU;
+                menuIndex = 0;
+                menuButtonWasPressed = false; // Reseta para o próximo pressionamento
+            }
         }
-    } else {
-        if (b == BTN_MENU) {
+        // O botão não está mais pressionado (foi solto)
+        else {
+            // Como não foi um pressionamento longo, deve ter sido um pressionamento curto.
             currentState = MENU;
+            menuIndex = 0;
+            menuButtonWasPressed = false; // Reseta para o próximo pressionamento
         }
-        menuButtonPressTime = 0;
     }
 }
 
@@ -981,9 +1035,11 @@ bool validateSettings() {
 
 void loadSettings() {
   EEPROM.get(0, settings);
+  defaultsWereLoaded = false; // Garante que a flag seja falsa por padrão
   // Se o checksum for inválido OU se as configurações forem inválidas, carrega os padrões.
   if (settings.checksum != calculateChecksum(settings) || !validateSettings()) {
     logError("Checksum invalido ou configuracoes invalidas! Carregando padroes.");
+    defaultsWereLoaded = true; // Define a flag para acionar o prompt de calibração
     lcd.clear();
     lcd.setCursor(0, 0); lcd.print("CONFIG. INVALIDA");
     lcd.setCursor(0, 1); lcd.print("CARREGANDO PADROES");
