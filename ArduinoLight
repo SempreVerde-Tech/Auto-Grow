@@ -1,0 +1,524 @@
+/*
+  FIRMWARE DE CONTROLE DE PH - VERSÃO FUNCIONAL
+  Corrigido por: Assistente AI
+  Data: 2024-09-26
+*/
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <EEPROM.h>
+#include <avr/wdt.h>
+#include <Adafruit_ADS1X15.h>
+
+// ================================================================================================
+// CONFIGURAÇÕES DE HARDWARE
+// ================================================================================================
+
+LiquidCrystal_I2C lcd(0x27, 20, 4);
+Adafruit_ADS1115 ads;
+
+#define ONE_WIRE_BUS 2
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+const byte upButton = 3, downButton = 4, menuButton = 5, pumpPin = 6, ledPin = 7;
+
+// Constantes
+const float TEMP_OFFSET = 0.6;
+const float KELVIN_25 = 298.15;
+const byte PH_BUFFER_SIZE = 15;
+const byte CALIB_SECONDS = 10;
+const unsigned int PUMP_ON_TIME = 10000;
+const unsigned long PUMP_WAIT_TIME = 300000;
+const unsigned int MENU_TIMEOUT = 30000;
+const unsigned int STARTUP_TIME = 5000;
+
+// Valores padrão
+const float DEFAULT_PH_IDEAL = 6.5;
+const float DEFAULT_PH_OFFSET = 2.8;
+const float DEFAULT_PH_SLOPE = -0.057;
+const float DEFAULT_MIN_SLOPE = -0.200;
+const float DEFAULT_MAX_SLOPE = -0.040;
+
+// Valores de calibração
+const float CALIB_PH4 = 4.01;
+const float CALIB_PH7 = 7.01;
+const float CALIB_PH10 = 10.01;
+
+// ================================================================================================
+// ESTRUTURAS DE DADOS
+// ================================================================================================
+
+struct Settings {
+  float pHIdeal;
+  float pHOffset;
+  float pHSlope;
+  float minSlope;
+  float maxSlope;
+  uint16_t checksum;
+};
+
+enum State {
+  STARTUP, MAIN, MENU, ADJUST_PH, CALIBRATE, TECH_MENU
+};
+
+Settings config;
+State currentState = STARTUP;
+float pHBuffer[PH_BUFFER_SIZE];
+float temperature = 25.0;
+float currentPH = 7.0;
+byte bufferIndex = 0;
+byte menuIndex = 0;
+bool pumpActive = false;
+bool waitingAfterPump = false;
+bool pHAlert = false;
+unsigned long lastPumpTime = 0;
+unsigned long lastTempRead = 0;
+unsigned long lastPHRead = 0;
+unsigned long lastButtonTime = 0;
+unsigned long stateStartTime = 0;
+
+// ================================================================================================
+// FUNÇÕES PRINCIPAIS - SETUP
+// ================================================================================================
+
+void setup() {
+  wdt_disable();
+  Serial.begin(9600);
+  
+  // Configuração de pinos
+  pinMode(upButton, INPUT_PULLUP);
+  pinMode(downButton, INPUT_PULLUP);
+  pinMode(menuButton, INPUT_PULLUP);
+  pinMode(pumpPin, OUTPUT);
+  pinMode(ledPin, OUTPUT);
+  digitalWrite(pumpPin, LOW);
+  digitalWrite(ledPin, LOW);
+  
+  // Inicialização do LCD
+  lcd.init();
+  lcd.backlight();
+  lcd.print("Iniciando...");
+  
+  // Inicialização dos sensores
+  sensors.begin();
+  if (!ads.begin()) {
+    lcd.clear();
+    lcd.print("Erro ADS1115!");
+    while(1) {
+      wdt_reset();
+      delay(1000);
+    }
+  }
+  ads.setGain(GAIN_ONE);
+  
+  loadSettings();
+  
+  // Inicializa buffer de pH
+  for (byte i = 0; i < PH_BUFFER_SIZE; i++) {
+    pHBuffer[i] = config.pHIdeal;
+  }
+  
+  stateStartTime = millis();
+  wdt_enable(WDTO_4S);
+}
+
+// ================================================================================================
+// LOOP PRINCIPAL
+// ================================================================================================
+
+void loop() {
+  wdt_reset();
+  
+  // Leitura de sensores
+  if (millis() - lastTempRead >= 2000) {
+    lastTempRead = millis();
+    readTemperature();
+  }
+  
+  if (millis() - lastPHRead >= 1000) {
+    lastPHRead = millis();
+    readPH();
+  }
+  
+  handleButtons();
+  handleState();
+  
+  if (currentState == MAIN) {
+    controlPump();
+  }
+  
+  updateDisplay();
+  delay(50);
+}
+
+// ================================================================================================
+// LEITURA DE SENSORES
+// ================================================================================================
+
+void readTemperature() {
+  sensors.requestTemperatures();
+  float temp = sensors.getTempCByIndex(0);
+  
+  if (temp != DEVICE_DISCONNECTED_C && temp > -40 && temp < 125) {
+    temperature = temp + TEMP_OFFSET;
+  }
+}
+
+void readPH() {
+  float voltage = ads.computeVolts(ads.readADC_SingleEnded(0));
+  
+  if (fabs(config.pHSlope) < 0.001) return;
+  
+  float tempK = temperature + 273.15;
+  float slopeT = config.pHSlope * (tempK / KELVIN_25);
+  
+  if (fabs(slopeT) < 0.001) return;
+  
+  float pHcalc = 7.0 + (voltage - config.pHOffset) / slopeT;
+  
+  if (!isnan(pHcalc) && pHcalc >= 0.0 && pHcalc <= 14.0) {
+    currentPH = pHcalc;
+    pHBuffer[bufferIndex] = currentPH;
+    bufferIndex = (bufferIndex + 1) % PH_BUFFER_SIZE;
+  }
+}
+
+// ================================================================================================
+// CONTROLE DA BOMBA
+// ================================================================================================
+
+void controlPump() {
+  float avgPH = getAveragePH();
+  
+  // Segurança
+  if (avgPH < 2.0 || avgPH > 12.0) {
+    digitalWrite(pumpPin, LOW);
+    pumpActive = false;
+    return;
+  }
+  
+  // Alerta pH baixo
+  if (avgPH < config.pHIdeal - 0.3) {
+    pHAlert = true;
+    digitalWrite(ledPin, HIGH);
+    if (pumpActive) {
+      digitalWrite(pumpPin, LOW);
+      pumpActive = false;
+      waitingAfterPump = true;
+      lastPumpTime = millis();
+    }
+    return;
+  } else {
+    pHAlert = false;
+    digitalWrite(ledPin, LOW);
+  }
+  
+  // Ativa bomba se pH alto
+  if (avgPH > config.pHIdeal + 0.3 && !waitingAfterPump && !pumpActive) {
+    pumpActive = true;
+    digitalWrite(pumpPin, HIGH);
+    lastPumpTime = millis();
+  }
+  
+  // Desliga bomba após tempo
+  if (pumpActive && millis() - lastPumpTime >= PUMP_ON_TIME) {
+    digitalWrite(pumpPin, LOW);
+    pumpActive = false;
+    waitingAfterPump = true;
+    lastPumpTime = millis();
+  }
+  
+  // Libera bomba após espera
+  if (waitingAfterPump && millis() - lastPumpTime >= PUMP_WAIT_TIME) {
+    waitingAfterPump = false;
+  }
+}
+
+// ================================================================================================
+// INTERFACE DO USUÁRIO - BOTÕES
+// ================================================================================================
+
+void handleButtons() {
+  static byte lastUpState = HIGH;
+  static byte lastDownState = HIGH;
+  static byte lastMenuState = HIGH;
+  static unsigned long lastDebounce = 0;
+  
+  byte upState = digitalRead(upButton);
+  byte downState = digitalRead(downButton);
+  byte menuState = digitalRead(menuButton);
+  
+  // Detecção de mudanças
+  if (upState != lastUpState || downState != lastDownState || menuState != lastMenuState) {
+    lastDebounce = millis();
+  }
+  
+  // Debounce
+  if (millis() - lastDebounce > 50) {
+    if (upState == LOW && lastUpState == HIGH) {
+      handleButtonPress(1); // UP
+    }
+    if (downState == LOW && lastDownState == HIGH) {
+      handleButtonPress(2); // DOWN
+    }
+    if (menuState == LOW && lastMenuState == HIGH) {
+      handleButtonPress(3); // MENU
+    }
+  }
+  
+  lastUpState = upState;
+  lastDownState = downState;
+  lastMenuState = menuState;
+  
+  // Timeout do menu
+  if (currentState != MAIN && currentState != STARTUP) {
+    if (millis() - lastButtonTime > MENU_TIMEOUT) {
+      currentState = MAIN;
+    }
+  }
+}
+
+void handleButtonPress(byte button) {
+  lastButtonTime = millis();
+  
+  switch (currentState) {
+    case MAIN:
+      if (button == 3) {
+        currentState = MENU;
+        menuIndex = 0;
+      }
+      break;
+      
+    case MENU:
+      if (button == 1) {
+        menuIndex = (menuIndex > 0) ? menuIndex - 1 : 2;
+      } else if (button == 2) {
+        menuIndex = (menuIndex < 2) ? menuIndex + 1 : 0;
+      } else if (button == 3) {
+        switch (menuIndex) {
+          case 0: currentState = ADJUST_PH; break;
+          case 1: currentState = CALIBRATE; break;
+          case 2: currentState = MAIN; break;
+        }
+      }
+      break;
+      
+    case ADJUST_PH:
+      if (button == 1) {
+        config.pHIdeal += 0.1;
+      } else if (button == 2) {
+        config.pHIdeal -= 0.1;
+      } else if (button == 3) {
+        // Limites e salvamento
+        if (config.pHIdeal < 0.0) config.pHIdeal = 0.0;
+        if (config.pHIdeal > 14.0) config.pHIdeal = 14.0;
+        saveSettings();
+        currentState = MAIN;
+      }
+      break;
+      
+    case CALIBRATE:
+      handleCalibration(button);
+      break;
+  }
+}
+
+// ================================================================================================
+// CALIBRAÇÃO SIMPLIFICADA
+// ================================================================================================
+
+void handleCalibration(byte button) {
+  static byte calibStep = 0;
+  static float voltageReading = 0;
+  
+  switch (calibStep) {
+    case 0: // Menu de calibração
+      lcd.clear();
+      lcd.print("1-Calibrar 7.0");
+      lcd.setCursor(0, 1);
+      lcd.print("2-Voltar");
+      
+      if (button == 1) {
+        calibStep = 1;
+        lcd.clear();
+        lcd.print("Mergulhe em pH 7.0");
+        lcd.setCursor(0, 1);
+        lcd.print("Pressione MENU");
+      } else if (button == 2) {
+        currentState = MAIN;
+      }
+      break;
+      
+    case 1: // Leitura
+      if (button == 3) {
+        voltageReading = performReading();
+        calibStep = 2;
+      }
+      break;
+      
+    case 2: // Salvamento
+      config.pHOffset = voltageReading;
+      saveSettings();
+      lcd.clear();
+      lcd.print("Calibracao OK!");
+      delay(2000);
+      currentState = MAIN;
+      calibStep = 0;
+      break;
+  }
+}
+
+float performReading() {
+  float sum = 0;
+  lcd.clear();
+  lcd.print("Lendo...");
+  
+  for (byte i = 0; i < CALIB_SECONDS; i++) {
+    wdt_reset();
+    float volt = ads.computeVolts(ads.readADC_SingleEnded(0));
+    sum += volt;
+    lcd.setCursor(0, 1);
+    lcd.print(i + 1);
+    lcd.print("/");
+    lcd.print(CALIB_SECONDS);
+    delay(1000);
+  }
+  
+  return sum / CALIB_SECONDS;
+}
+
+// ================================================================================================
+// ATUALIZAÇÃO DO DISPLAY
+// ================================================================================================
+
+void updateDisplay() {
+  static State lastState = STARTUP;
+  static float lastPH = -1;
+  static float lastTemp = -1;
+  
+  if (lastState != currentState) {
+    lcd.clear();
+    lastState = currentState;
+    lastPH = -1;
+    lastTemp = -1;
+  }
+  
+  switch (currentState) {
+    case STARTUP:
+      lcd.setCursor(0, 1);
+      lcd.print("Iniciando...");
+      break;
+      
+    case MAIN:
+      {
+        float avgPH = getAveragePH();
+        if (fabs(lastPH - avgPH) > 0.05 || fabs(lastTemp - temperature) > 0.2) {
+          lcd.setCursor(0, 0);
+          if (pHAlert) {
+            lcd.print("** PH BAIXO **");
+          } else {
+            lcd.print("STATUS ");
+            // Indicador simples
+            lcd.print((millis() / 500) % 2 ? "|" : "-");
+          }
+          
+          lcd.setCursor(0, 1);
+          lcd.print("PH: ");
+          lcd.print(avgPH, 2);
+          
+          lcd.setCursor(0, 2);
+          lcd.print("T:");
+          lcd.print(temperature, 1);
+          lcd.print("C ID:");
+          lcd.print(config.pHIdeal, 1);
+          
+          lastPH = avgPH;
+          lastTemp = temperature;
+        }
+      }
+      break;
+      
+    case MENU:
+      lcd.setCursor(0, 0);
+      lcd.print("MENU PRINCIPAL");
+      lcd.setCursor(0, 1);
+      lcd.print(menuIndex == 0 ? "> Ajustar PH" : "  Ajustar PH");
+      lcd.setCursor(0, 2);
+      lcd.print(menuIndex == 1 ? "> Calibrar" : "  Calibrar");
+      lcd.setCursor(0, 3);
+      lcd.print(menuIndex == 2 ? "> Voltar" : "  Voltar");
+      break;
+      
+    case ADJUST_PH:
+      lcd.setCursor(0, 0);
+      lcd.print("pH Ideal:");
+      lcd.setCursor(0, 1);
+      lcd.print(config.pHIdeal, 2);
+      lcd.setCursor(0, 3);
+      lcd.print("MENU=Salvar");
+      break;
+      
+    case CALIBRATE:
+      // Display controlado por handleCalibration
+      break;
+  }
+}
+
+// ================================================================================================
+// FUNÇÕES AUXILIARES
+// ================================================================================================
+
+float getAveragePH() {
+  float sum = 0;
+  for (byte i = 0; i < PH_BUFFER_SIZE; i++) {
+    sum += pHBuffer[i];
+  }
+  return sum / PH_BUFFER_SIZE;
+}
+
+void handleState() {
+  switch (currentState) {
+    case STARTUP:
+      if (millis() - stateStartTime > STARTUP_TIME) {
+        currentState = MAIN;
+      }
+      break;
+  }
+}
+
+uint16_t calculateChecksum(const Settings& s) {
+  uint16_t checksum = 0;
+  const byte* p = (const byte*)&s;
+  for (size_t i = 0; i < sizeof(s) - sizeof(s.checksum); i++) {
+    checksum += *p++;
+  }
+  return checksum;
+}
+
+void loadSettings() {
+  EEPROM.get(0, config);
+  
+  if (config.checksum != calculateChecksum(config) || !validateSettings()) {
+    // Carrega padrões
+    config.pHIdeal = DEFAULT_PH_IDEAL;
+    config.pHOffset = DEFAULT_PH_OFFSET;
+    config.pHSlope = DEFAULT_PH_SLOPE;
+    config.minSlope = DEFAULT_MIN_SLOPE;
+    config.maxSlope = DEFAULT_MAX_SLOPE;
+    saveSettings();
+  }
+}
+
+void saveSettings() {
+  config.checksum = calculateChecksum(config);
+  EEPROM.put(0, config);
+}
+
+bool validateSettings() {
+  if (config.pHIdeal < 0.0 || config.pHIdeal > 14.0) return false;
+  if (config.minSlope >= config.maxSlope) return false;
+  if (fabs(config.pHSlope) < 0.001) return false;
+  return true;
+}
