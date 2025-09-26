@@ -14,7 +14,6 @@
 #include <EEPROM.h>
 #include <Adafruit_ADS1X15.h>
 
-// Watchdog Timer apenas para AVR (Arduino tradicional)
 #ifdef __AVR__
   #include <avr/wdt.h>
 #endif
@@ -23,41 +22,35 @@
 // == CONFIGURAÇÕES DE HARDWARE E CONSTANTES OTIMIZADAS                                         ==
 // ================================================================================================
 
-// --- Objetos de Hardware ---
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 Adafruit_ADS1115 ads;
 
-// --- Pinos do Arduino ---
 #define ONE_WIRE_BUS 2
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 const int upButton = 3, downButton = 4, menuButton = 5, pumpPin = 6, ledPin = 7;
 
-// --- Constantes de Calibração e Operação (OTIMIZADAS) ---
 const float TEMP_OFFSET_CELSIUS = 0.6;
 const float KELVIN_25 = 298.15;
-const int PH_READING_COUNT = 15; // REDUZIDO de 30 para 15
-const int CALIBRATION_READING_SECONDS = 20; // REDUZIDO de 30 para 20
+const int PH_READING_COUNT = 15;
+const int CALIBRATION_READING_SECONDS = 20;
 const unsigned long pumpDuration = 10000;
 const unsigned long waitAfterPump = 300000;
 const unsigned long timeout = 30000;
-const unsigned long startupTime = 10000; // REDUZIDO de 15000 para 10000
+const unsigned long startupTime = 10000;
 
-// --- Valores Padrão para Configurações ---
 const float DEFAULT_PH_IDEAL = 6.5;
 const float DEFAULT_PH_OFFSET = 2.8;
 const float DEFAULT_PH_SLOPE = -0.057;
 const float DEFAULT_MIN_SLOPE = -0.200;
 const float DEFAULT_MAX_SLOPE = -0.040;
 
-// --- Valores de pH para as Soluções de Calibração ---
 const float calibpH4 = 4.01, calibpH7 = 7.01, calibpH10 = 10.01;
 
 // ================================================================================================
 // == ESTRUTURAS DE DADOS E VARIÁVEIS GLOBAIS OTIMIZADAS                                        ==
 // ================================================================================================
 
-// --- Estruturas e Enums ---
 struct Settings {
   float pHIdeal;
   float pHOffset;
@@ -79,9 +72,8 @@ State currentState = STARTUP;
 
 enum ButtonPress { BTN_NONE, BTN_UP, BTN_DOWN, BTN_MENU };
 
-// --- Variáveis de Controle de Estado e Tempo (OTIMIZADAS) ---
 unsigned long startupEntryTime = 0, lastButtonPress = 0, lastPumpTime = 0, lastPhReadTime = 0, lastTempReadTime = 0;
-float pHReadings[15]; // REDUZIDO para 15 elementos
+float pHReadings[15];
 float temperature = 25.0;
 float pHValue = 7.0;
 int readingIndex = 0, menuIndex = 0, calibMenuIndex = 0, calibSolutionIndex = 0, selectedCalibPoint = 0;
@@ -125,7 +117,7 @@ uint16_t calculateChecksum(const Settings&);
 bool validateSettings();
 
 // ================================================================================================
-// == FUNÇÕES PRINCIPAIS (SETUP E LOOP) OTIMIZADAS                                              ==
+// == FUNÇÕES PRINCIPAIS (SETUP E LOOP)                                                         ==
 // ================================================================================================
 
 float performStableReading(int seconds) {
@@ -234,7 +226,10 @@ void loop() {
   updateDisplay();
 }
 
-// --- Leitura de Sensores OTIMIZADAS ---
+// ================================================================================================
+// == FUNÇÕES DE SENSORES E CONTROLE                                                            ==
+// ================================================================================================
+
 void readTemperature() {
   static int errorCount = 0;
   sensors.requestTemperatures();
@@ -242,7 +237,6 @@ void readTemperature() {
   if (t == DEVICE_DISCONNECTED_C || isnan(t)) {
     errorCount++;
     if (errorCount > 5) { 
-      Serial.print(F("ERRO: Temp!"));
       currentState = SENSOR_ERROR; 
     }
   } else {
@@ -264,8 +258,6 @@ void readpH() {
     pHValue = pHcalc;
     pHReadings[readingIndex] = pHValue;
     readingIndex = (readingIndex + 1) % PH_READING_COUNT;
-  } else {
-    Serial.print(F("ERRO: pH fora faixa"));
   }
 }
 
@@ -275,7 +267,6 @@ void controlPump() {
   if (phAvg < 2.0 || phAvg > 12.0) {
     digitalWrite(pumpPin, LOW);
     pumpActive = false;
-    Serial.println(F("ALERTA: pH perigoso!"));
     return;
   }
 
@@ -313,7 +304,7 @@ void controlPump() {
 }
 
 // ================================================================================================
-// == INTERFACE COM O USUÁRIO OTIMIZADA                                                         ==
+// == INTERFACE COM O USUÁRIO                                                                   ==
 // ================================================================================================
 
 void updateDisplay() {
@@ -475,7 +466,7 @@ ButtonPress checkButtons() {
 }
 
 // ================================================================================================
-// == GERENCIAMENTO DE ESTADOS OTIMIZADOS                                                       ==
+// == GERENCIAMENTO DE ESTADOS                                                                  ==
 // ================================================================================================
 
 void handleStartup() { 
@@ -530,7 +521,56 @@ void handleAdjustPH(ButtonPress b) {
     if (settings.pHIdeal < 0.0) settings.pHIdeal = 0.0; 
 }
 
-// ... (continuação das funções handle mantendo o mesmo padrão de otimização)
+void handleCalibrateMenu(ButtonPress b) {
+    if (b == BTN_UP) menuIndex = (menuIndex - 1 + 3) % 3;
+    else if (b == BTN_DOWN) menuIndex = (menuIndex + 1) % 3;
+    else if (b == BTN_MENU) {
+        switch (menuIndex) {
+            case 0: currentState = CALIBRATE_ONE_POINT; break;
+            case 1: currentState = CALIBRATE_TWO_POINT_FIRST; break;
+            case 2: currentState = MAIN; menuIndex = 0; break;
+        }
+    }
+}
+
+void handleInitialCalibrationPrompt(ButtonPress b) { 
+    if (b == BTN_UP) calibMenuIndex = (calibMenuIndex - 1 + 3) % 3; 
+    else if (b == BTN_DOWN) calibMenuIndex = (calibMenuIndex + 1) % 3; 
+    else if (b == BTN_MENU) { 
+        switch (calibMenuIndex) { 
+            case 0: currentState = CALIBRATE_ONE_POINT; break; 
+            case 1: currentState = CALIBRATE_TWO_POINT_FIRST; break; 
+            case 2: currentState = MAIN; break; 
+        } 
+    } 
+}
+
+void handleCalibrationConfirmSlope(ButtonPress b) {
+    if (b == BTN_UP || b == BTN_DOWN) {
+        confirmIndex = !confirmIndex;
+    }
+    if (b == BTN_MENU) {
+        if (confirmIndex == 1) {
+            settings.pHSlope = tempSlope;
+            settings.pHOffset = tempOffset;
+            saveSettings();
+            lcd.clear(); 
+            lcd.print(F("Calibracao Forcada")); 
+            lcd.setCursor(0, 1); 
+            lcd.print(F("Concluida!")); 
+            delay(1500);
+        } else {
+            lcd.clear(); 
+            lcd.print(F("Calibracao")); 
+            lcd.setCursor(0, 1); 
+            lcd.print(F("Cancelada.")); 
+            delay(1500);
+        }
+        currentState = MAIN;
+        confirmIndex = 0;
+        menuIndex = 0;
+    }
+}
 
 void handleSensorDiagnostic() {
     lcd.clear();
@@ -540,7 +580,7 @@ void handleSensorDiagnostic() {
     waitForMenuConfirm();
     lcd.clear();
     lcd.print(F("Lendo tensao..."));
-    float v_ph7 = performStableReading(20); // REDUZIDO
+    float v_ph7 = performStableReading(20);
 
     lcd.clear();
     lcd.print(F("DIAGNOSTICO: PONTO 2"));
@@ -549,7 +589,7 @@ void handleSensorDiagnostic() {
     waitForMenuConfirm();
     lcd.clear();
     lcd.print(F("Lendo tensao..."));
-    float v_ph4 = performStableReading(20); // REDUZIDO
+    float v_ph4 = performStableReading(20);
 
     readTemperature();
     float tempK = temperature + 273.15;
@@ -573,14 +613,230 @@ void handleSensorDiagnostic() {
     currentState = TECH_MENU;
 }
 
+void handleAdjustSlopeLimits(ButtonPress b) {
+    static int slopeMenuIndex = 0;
+    static bool editing = false;
+
+    if (editing) {
+        if (slopeMenuIndex == 0) {
+            if (b == BTN_UP) settings.minSlope -= 0.001;
+            if (b == BTN_DOWN) settings.minSlope += 0.001;
+        } else {
+            if (b == BTN_UP) settings.maxSlope -= 0.001;
+            if (b == BTN_DOWN) settings.maxSlope += 0.001;
+        }
+        if (b == BTN_MENU) {
+            editing = false;
+        }
+    } else {
+        if (b == BTN_UP) slopeMenuIndex = (slopeMenuIndex - 1 + 3) % 3;
+        if (b == BTN_DOWN) slopeMenuIndex = (slopeMenuIndex + 1) % 3;
+        if (b == BTN_MENU) {
+            if (slopeMenuIndex < 2) {
+                editing = true;
+            } else {
+                saveSettings();
+                lcd.clear();
+                lcd.print(F("Limites Salvos!"));
+                delay(1500);
+                currentState = TECH_MENU;
+            }
+        }
+    }
+
+    lcd.setCursor(0, 0); 
+    lcd.print(F("AJUSTAR LIMITES SLOPE"));
+
+    lcd.setCursor(0, 1);
+    if (slopeMenuIndex == 0) lcd.print(editing ? F(">>") : F("> ")); else lcd.print(F("  "));
+    lcd.print(F("Min: ")); lcd.print(settings.minSlope, 4);
+
+    lcd.setCursor(0, 2);
+    if (slopeMenuIndex == 1) lcd.print(editing ? F(">>") : F("> ")); else lcd.print(F("  "));
+    lcd.print(F("Max: ")); lcd.print(settings.maxSlope, 4);
+
+    lcd.setCursor(0, 3);
+    if (slopeMenuIndex == 2) lcd.print(F("> ")); else lcd.print(F("  "));
+    lcd.print(F("Salvar e Sair"));
+}
+
+void handleTechMenu(ButtonPress b) {
+    if (b == BTN_UP) menuIndex = (menuIndex - 1 + 3) % 3;
+    else if (b == BTN_DOWN) menuIndex = (menuIndex + 1) % 3;
+    else if (b == BTN_MENU) {
+        switch (menuIndex) {
+            case 0: handleSensorDiagnostic(); break;
+            case 1: currentState = ADJUST_SLOPE_LIMITS; break;
+            case 2: currentState = MAIN; menuIndex = 0; break;
+        }
+    }
+}
+
+void handleCalibrateOnePoint(ButtonPress b) {
+    lcd.setCursor(0, 0); 
+    lcd.print(F("CALIBRAR: 1 PONTO  ")); 
+    lcd.setCursor(0, 1); 
+    lcd.print(calibSolutionIndex == 0 ? F("> Solucao 4.01") : F("  Solucao 4.01")); 
+    lcd.setCursor(0, 2); 
+    lcd.print(calibSolutionIndex == 1 ? F("> Solucao 7.01") : F("  Solucao 7.01")); 
+    lcd.setCursor(0, 3); 
+    lcd.print(calibSolutionIndex == 2 ? F("> Solucao 10.01") : F("  Solucao 10.01"));
+    
+    if (b == BTN_UP) calibSolutionIndex = (calibSolutionIndex - 1 + 3) % 3; 
+    else if (b == BTN_DOWN) calibSolutionIndex = (calibSolutionIndex + 1) % 3; 
+    else if (b == BTN_MENU) {
+        lcd.clear(); 
+        lcd.print(F("Mergulhe a sonda")); 
+        lcd.setCursor(0, 1); 
+        lcd.print(F("na solucao e espere")); 
+        waitForMenuConfirm(); 
+        lcd.clear(); 
+        lcd.print(F("CALIBRANDO..."));
+        float avgVoltage = performStableReading(CALIBRATION_READING_SECONDS);
+        readTemperature();
+        float targetpH = 0;
+        switch (calibSolutionIndex) { 
+            case 0: targetpH = calibpH4; break; 
+            case 1: targetpH = calibpH7; break; 
+            case 2: targetpH = calibpH10; break; 
+        }
+        if (fabs(settings.pHSlope) < 1e-6) { 
+            lcd.clear(); 
+            lcd.print(F("Slope invalido.")); 
+            lcd.setCursor(0,1); 
+            lcd.print(F("Faca 2 pontos")); 
+            delay(2500); 
+        } else {
+            float tempK = temperature + 273.15;
+            float slopeT = settings.pHSlope * (tempK / KELVIN_25);
+            settings.pHOffset = avgVoltage - (slopeT * (targetpH - 7.0));
+            saveSettings();
+            lcd.clear(); 
+            lcd.print(F("Calibracao")); 
+            lcd.setCursor(0, 1); 
+            lcd.print(F("Concluida!")); 
+            delay(1500);
+        }
+        currentState = MAIN;
+        menuIndex = 0;
+    }
+}
+
+void handleCalibrateTwoPointFirst(ButtonPress b) {
+    lcd.setCursor(0, 0); 
+    lcd.print(F("CALIBRAR: PONTO 1/2")); 
+    lcd.setCursor(0, 1); 
+    lcd.print(calibSolutionIndex == 0 ? F("> Solucao 4.01") : F("  Solucao 4.01")); 
+    lcd.setCursor(0, 2); 
+    lcd.print(calibSolutionIndex == 1 ? F("> Solucao 7.01") : F("  Solucao 7.01")); 
+    lcd.setCursor(0, 3); 
+    lcd.print(calibSolutionIndex == 2 ? F("> Solucao 10.01") : F("  Solucao 10.01"));
+    
+    if (b == BTN_UP) calibSolutionIndex = (calibSolutionIndex - 1 + 3) % 3; 
+    else if (b == BTN_DOWN) calibSolutionIndex = (calibSolutionIndex + 1) % 3; 
+    else if (b == BTN_MENU) {
+        selectedCalibPoint = calibSolutionIndex;
+        lcd.clear(); 
+        lcd.print(F("Mergulhe a sonda")); 
+        lcd.setCursor(0, 1); 
+        lcd.print(F("na solucao e espere")); 
+        waitForMenuConfirm(); 
+        lcd.clear(); 
+        lcd.print(F("CALIBRANDO..."));
+        firstCalibValue = performStableReading(CALIBRATION_READING_SECONDS);
+        lcd.clear(); 
+        lcd.print(F("Primeiro ponto")); 
+        lcd.setCursor(0, 1); 
+        lcd.print(F("calibrado!")); 
+        delay(1200);
+        currentState = CALIBRATE_TWO_POINT_SECOND; 
+        calibSolutionIndex = (selectedCalibPoint + 1) % 3;
+    }
+}
+
+void handleCalibrateTwoPointSecond(ButtonPress b) {
+    lcd.setCursor(0, 0); 
+    lcd.print(F("CALIBRAR: PONTO 2/2"));
+    
+    if (b == BTN_UP) { 
+        do { 
+            calibSolutionIndex = (calibSolutionIndex - 1 + 3) % 3; 
+        } while (calibSolutionIndex == selectedCalibPoint); 
+    } else if (b == BTN_DOWN) { 
+        do { 
+            calibSolutionIndex = (calibSolutionIndex + 1) % 3; 
+        } while (calibSolutionIndex == selectedCalibPoint); 
+    }
+    
+    lcd.setCursor(0, 1); 
+    lcd.print((calibSolutionIndex == 0 && selectedCalibPoint != 0) ? F("> Solucao 4.01") : F("  Solucao 4.01"));
+    lcd.setCursor(0, 2); 
+    lcd.print((calibSolutionIndex == 1 && selectedCalibPoint != 1) ? F("> Solucao 7.01") : F("  Solucao 7.01"));
+    lcd.setCursor(0, 3); 
+    lcd.print((calibSolutionIndex == 2 && selectedCalibPoint != 2) ? F("> Solucao 10.01") : F("  Solucao 10.01"));
+    
+    if (b == BTN_MENU) {
+        lcd.clear(); 
+        lcd.print(F("Mergulhe a sonda")); 
+        lcd.setCursor(0, 1); 
+        lcd.print(F("na solucao e espere")); 
+        waitForMenuConfirm(); 
+        lcd.clear(); 
+        lcd.print(F("CALIBRANDO..."));
+        float secondCalibValue = performStableReading(CALIBRATION_READING_SECONDS);
+        float targetpH1 = 0, targetpH2 = 0;
+        switch (selectedCalibPoint) { 
+            case 0: targetpH1 = calibpH4; break; 
+            case 1: targetpH1 = calibpH7; break; 
+            case 2: targetpH1 = calibpH10; break; 
+        }
+        switch (calibSolutionIndex) { 
+            case 0: targetpH2 = calibpH4; break; 
+            case 1: targetpH2 = calibpH7; break; 
+            case 2: targetpH2 = calibpH10; break; 
+        }
+        float denom = (targetpH2 - targetpH1);
+        if (fabs(denom) < 1e-6) { 
+            lcd.clear(); 
+            lcd.print(F("Erro: pontos iguais ")); 
+            delay(1500); 
+        } else {
+            readTemperature();
+            float tempK = temperature + 273.15;
+            float tempFactor = tempK / KELVIN_25;
+
+            float newSlope = (secondCalibValue - firstCalibValue) / denom;
+            float newSlopeNormalized = newSlope / tempFactor;
+
+            tempSlope = newSlopeNormalized;
+            tempOffset = firstCalibValue - (newSlope * (targetpH1 - 7.0));
+
+            if (newSlopeNormalized > settings.maxSlope || newSlopeNormalized < settings.minSlope) {
+                currentState = CALIBRATION_CONFIRM_SLOPE;
+            } else {
+                settings.pHSlope = tempSlope;
+                settings.pHOffset = tempOffset;
+                saveSettings();
+                lcd.clear(); 
+                lcd.print(F("Calibracao")); 
+                lcd.setCursor(0, 1); 
+                lcd.print(F("Concluida!")); 
+                delay(1500);
+                currentState = MAIN;
+                menuIndex = 0;
+            }
+        }
+    }
+}
+
 // ================================================================================================
-// == FUNÇÕES AUXILIARES OTIMIZADAS                                                             ==
+// == FUNÇÕES AUXILIARES                                                                        ==
 // ================================================================================================
 
 float averagePH() { 
     float sum = 0; 
     for(int i = 0; i < PH_READING_COUNT; i++) sum += pHReadings[i]; 
-    return sum / (float)PH_READING_COUNT; // MÉDIA SIMPLES - MAIS RÁPIDA
+    return sum / (float)PH_READING_COUNT;
 }
 
 bool isPHStable() { 
@@ -589,7 +845,7 @@ bool isPHStable() {
         if(pHReadings[i] < minVal) minVal = pHReadings[i];
         if(pHReadings[i] > maxVal) maxVal = pHReadings[i];
     } 
-    return (maxVal - minVal) <= 0.3; // LIMITE MAIS FLEXÍVEL
+    return (maxVal - minVal) <= 0.3;
 }
 
 uint16_t calculateChecksum(const Settings& s) { 
@@ -613,7 +869,7 @@ void loadSettings() {
     lcd.clear();
     lcd.setCursor(0, 0); lcd.print(F("CONFIG INVALIDA"));
     lcd.setCursor(0, 1); lcd.print(F("PADROES CARREGADOS"));
-    delay(2000); // REDUZIDO
+    delay(2000);
 
     settings.pHIdeal = DEFAULT_PH_IDEAL;
     settings.pHOffset = DEFAULT_PH_OFFSET;
@@ -645,5 +901,3 @@ bool waitForMenuConfirm() {
         delay(80); 
     } 
 }
-
-// ... (demais funções handle seguindo o mesmo padrão de otimização)
