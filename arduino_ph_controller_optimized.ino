@@ -76,6 +76,40 @@
 #define TEMP_MIN_VALID -40.0f
 #define TEMP_MAX_VALID 125.0f
 
+// Constantes de operação e thresholds
+#define PH_TOLERANCE_IDEAL 0.3f        // Tolerância para ação da bomba
+#define PH_DISPLAY_THRESHOLD 0.05f     // Threshold para atualizar display
+#define PH_STABILITY_RANGE 0.2f        // Range para considerar pH estável
+#define TEMP_DISPLAY_THRESHOLD 0.2f    // Threshold para atualizar temperatura no display
+#define PH_IDEAL_THRESHOLD 0.05f       // Threshold para atualizar pH ideal no display
+
+// Constantes de interface e navegação
+#define PH_ADJUSTMENT_STEP 0.1f        // Passo para ajustar pH ideal
+#define SLOPE_ADJUSTMENT_STEP 0.001f   // Passo para ajustar limites de slope
+#define MENU_ITEMS_COUNT 3             // Número de itens no menu principal
+#define CALIB_SOLUTIONS_COUNT 3        // Número de soluções de calibração
+
+// Constantes de erro e recuperação
+#define MAX_SENSOR_ERRORS 5            // Máximo de erros antes de falha
+#define MAX_RECOVERY_ATTEMPTS 3        // Máximo de tentativas de recuperação
+#define ERROR_DISPLAY_TIME 10000UL     // Tempo em tela de erro antes de recuperação
+#define SYSTEM_LOOP_DELAY 10           // Delay básico do loop principal
+
+// Constantes de leitura de sensores
+#define SENSOR_READ_INTERVAL_TEMP 2000UL  // Intervalo de leitura de temperatura
+#define SENSOR_READ_INTERVAL_PH 1000UL    // Intervalo de leitura de pH
+#define STABLE_READING_INTERVAL 1000UL    // Intervalo entre leituras na calibração
+
+// Constantes de display e interface
+#define PROGRESS_BAR_LENGTH 16         // Comprimento da barra de progresso
+#define BUTTON_LONG_PRESS_TIME 2000UL  // Tempo para toque longo
+#define SPINNER_POSITIONS 4            // Número de posições do spinner
+
+// Constantes de validação EEPROM
+#define CONFIG_MAGIC_NUMBER 0x12345678UL  // Magic number para validação
+#define CONFIG_VERSION 6               // Versão da configuração
+#define MIN_VALID_SLOPE 0.001f         // Slope mínimo válido para evitar divisão por zero
+
 // ================================================================================================
 // == ESTRUTURAS DE DADOS                                                                        ==
 // ================================================================================================
@@ -353,14 +387,14 @@ private:
     config.pHSlope = DEFAULT_PH_SLOPE;
     config.minSlope = DEFAULT_MIN_SLOPE;
     config.maxSlope = DEFAULT_MAX_SLOPE;
-    config.version = 6;
-    config.magic = 0x12345678UL;
+    config.version = CONFIG_VERSION;
+    config.magic = CONFIG_MAGIC_NUMBER;
     config.checksum = calculateChecksum();
   }
   
   bool validateConfiguration(const Configuration& cfg) {
     // Verifica magic number
-    if (cfg.magic != 0x12345678UL) return false;
+    if (cfg.magic != CONFIG_MAGIC_NUMBER) return false;
     
     // Verifica checksum
     Configuration temp = cfg;
@@ -378,7 +412,7 @@ private:
     // Valida ranges
     if (cfg.pHIdeal < PH_MIN_VALID || cfg.pHIdeal > PH_MAX_VALID) return false;
     if (cfg.minSlope >= cfg.maxSlope) return false;
-    if (abs(cfg.pHSlope) < 0.001f) return false;
+    if (abs(cfg.pHSlope) < MIN_VALID_SLOPE) return false;
     
     return true;
   }
@@ -412,14 +446,14 @@ private:
   void updateSensors() {
     unsigned long currentTime = millis();
     
-    // Leitura de temperatura (a cada 2 segundos)
-    if (currentTime - lastTempRead >= 2000) {
+    // Leitura de temperatura
+    if (currentTime - lastTempRead >= SENSOR_READ_INTERVAL_TEMP) {
       lastTempRead = currentTime;
       readTemperature();
     }
     
-    // Leitura de pH (a cada 1 segundo)
-    if (currentTime - lastPHRead >= 1000) {
+    // Leitura de pH
+    if (currentTime - lastPHRead >= SENSOR_READ_INTERVAL_PH) {
       lastPHRead = currentTime;
       readPH();
     }
@@ -433,7 +467,7 @@ private:
     
     if (temp == DEVICE_DISCONNECTED_C || isnan(temp)) {
       errorCount++;
-      if (errorCount > 5) {
+      if (errorCount > MAX_SENSOR_ERRORS) {
         setError(ERROR_SENSOR_TEMP);
         return;
       }
@@ -450,13 +484,13 @@ private:
     float voltage = ads.computeVolts(ads.readADC_SingleEnded(0));
     
     // Verifica se o slope é válido
-    if (abs(config.pHSlope) < 1e-6) return;
+    if (abs(config.pHSlope) < MIN_VALID_SLOPE) return;
     
     // Compensação por temperatura
     float tempK = currentTemperature + 273.15f;
     float slopeT = config.pHSlope * (tempK / KELVIN_25);
     
-    if (abs(slopeT) < 1e-6) return;
+    if (abs(slopeT) < MIN_VALID_SLOPE) return;
     
     // Calcula pH
     float pHCalc = 7.0f + (voltage - config.pHOffset) / slopeT;
@@ -513,7 +547,7 @@ private:
       if (pHBuffer[i] > maxVal) maxVal = pHBuffer[i];
     }
     
-    return (maxVal - minVal) <= 0.2f;
+    return (maxVal - minVal) <= PH_STABILITY_RANGE;
   }
   
   // ================================================================================================
@@ -532,7 +566,7 @@ private:
     }
     
     // Verifica se pH está abaixo do ideal
-    if (currentPH < config.pHIdeal - 0.3f) {
+    if (currentPH < config.pHIdeal - PH_TOLERANCE_IDEAL) {
       phBelowIdeal = true;
       digitalWrite(LED_PIN, HIGH);
       
@@ -553,7 +587,7 @@ private:
     if (!isPHStable()) return;
     
     // Lógica de ativação da bomba
-    if (currentPH > config.pHIdeal + 0.3f && !waitingAfterPump && !pumpActive) {
+    if (currentPH > config.pHIdeal + PH_TOLERANCE_IDEAL && !waitingAfterPump && !pumpActive) {
       pumpActive = true;
       digitalWrite(PUMP_PIN, HIGH);
       lastPumpTime = millis();
@@ -594,7 +628,7 @@ private:
       if (!menuPressed) {
         menuPressed = true;
         menuPressTime = currentTime;
-      } else if (currentTime - menuPressTime > 2000) {
+      } else if (currentTime - menuPressTime > BUTTON_LONG_PRESS_TIME) {
         menuPressed = false;
         lastPress = currentTime;
         lastButtonPress = currentTime;
@@ -671,9 +705,9 @@ private:
     lcd.print(F("Inicializando..."));
     
     // Barra de progresso simples
-    uint8_t progress = map(millis() - stateStartTime, 0, STARTUP_TIME, 0, 16);
+    uint8_t progress = map(millis() - stateStartTime, 0, STARTUP_TIME, 0, PROGRESS_BAR_LENGTH);
     lcd.setCursor(0, 2);
-    for (uint8_t i = 0; i < progress && i < 16; i++) {
+    for (uint8_t i = 0; i < progress && i < PROGRESS_BAR_LENGTH; i++) {
       lcd.print("=");
     }
   }
@@ -694,13 +728,13 @@ private:
     } else {
       const char spinner[] = {'|', '/', '-', '\\'};
       lcd.print(F("STATUS ATUAL "));
-      lcd.print(spinner[bufferIndex % 4]);
+      lcd.print(spinner[bufferIndex % SPINNER_POSITIONS]);
     }
     
     // Atualiza valores apenas se mudaram significativamente
-    if (abs(lastDisplayPH - currentPH) > 0.05f ||
-        abs(lastDisplayTemp - currentTemperature) > 0.2f ||
-        abs(lastDisplayIdeal - config.pHIdeal) > 0.05f ||
+    if (abs(lastDisplayPH - currentPH) > PH_DISPLAY_THRESHOLD ||
+        abs(lastDisplayTemp - currentTemperature) > TEMP_DISPLAY_THRESHOLD ||
+        abs(lastDisplayIdeal - config.pHIdeal) > PH_IDEAL_THRESHOLD ||
         alertChanged) {
       
       lcd.setCursor(0, 1);
@@ -851,9 +885,9 @@ private:
   
   void handleMenu(ButtonState button) {
     if (button == BTN_UP) {
-      menuIndex = (menuIndex == 0) ? 2 : menuIndex - 1;
+      menuIndex = (menuIndex == 0) ? (MENU_ITEMS_COUNT - 1) : menuIndex - 1;
     } else if (button == BTN_DOWN) {
-      menuIndex = (menuIndex + 1) % 3;
+      menuIndex = (menuIndex + 1) % MENU_ITEMS_COUNT;
     } else if (button == BTN_MENU) {
       switch (menuIndex) {
         case 0:
@@ -872,10 +906,10 @@ private:
   
   void handleAdjustPH(ButtonState button) {
     if (button == BTN_UP) {
-      config.pHIdeal += 0.1f;
+      config.pHIdeal += PH_ADJUSTMENT_STEP;
       if (config.pHIdeal > PH_MAX_VALID) config.pHIdeal = PH_MAX_VALID;
     } else if (button == BTN_DOWN) {
-      config.pHIdeal -= 0.1f;
+      config.pHIdeal -= PH_ADJUSTMENT_STEP;
       if (config.pHIdeal < PH_MIN_VALID) config.pHIdeal = PH_MIN_VALID;
     } else if (button == BTN_MENU) {
       saveConfiguration();
@@ -886,9 +920,9 @@ private:
   
   void handleCalibrateMenu(ButtonState button) {
     if (button == BTN_UP) {
-      menuIndex = (menuIndex == 0) ? 2 : menuIndex - 1;
+      menuIndex = (menuIndex == 0) ? (MENU_ITEMS_COUNT - 1) : menuIndex - 1;
     } else if (button == BTN_DOWN) {
-      menuIndex = (menuIndex + 1) % 3;
+      menuIndex = (menuIndex + 1) % MENU_ITEMS_COUNT;
     } else if (button == BTN_MENU) {
       switch (menuIndex) {
         case 0:
@@ -938,8 +972,8 @@ private:
   
   void handleErrorRecovery() {
     if (currentState == STATE_ERROR) {
-      // Após 10 segundos em erro, tenta recuperação
-      if (millis() - stateStartTime > 10000) {
+      // Após tempo determinado em erro, tenta recuperação
+      if (millis() - stateStartTime > ERROR_DISPLAY_TIME) {
         changeState(STATE_RECOVERY);
       }
     }
@@ -949,7 +983,7 @@ private:
     recoveryAttempts++;
     
     // Limita tentativas de recuperação
-    if (recoveryAttempts > 3) {
+    if (recoveryAttempts > MAX_RECOVERY_ATTEMPTS) {
       // Reset completo do sistema
       #ifdef __AVR__
       wdt_enable(WDTO_15MS);
@@ -991,9 +1025,9 @@ private:
       wdt_reset();
       #endif
       
-      while (millis() - lastRead < 1000) {
+      while (millis() - lastRead < STABLE_READING_INTERVAL) {
         updateDisplay();
-        delay(10);
+        delay(SYSTEM_LOOP_DELAY);
       }
       lastRead = millis();
       
@@ -1034,5 +1068,5 @@ void loop() {
   phController.update();
   
   // Pequeno delay para não sobrecarregar o sistema
-  delay(10);
+  delay(SYSTEM_LOOP_DELAY);
 }
