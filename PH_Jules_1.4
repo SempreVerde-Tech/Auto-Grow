@@ -1105,14 +1105,14 @@ void updateMonitoringValues() {
     if (isLowPh) {
       lcd.print(F(" PH ABAIXO DO IDEAL "));
     } else {
-      lcd.print(F("MONITORANDO         ")); // Limpa a linha com espaços
+      lcd.print(F(" MONITORANDO        ")); // Limpa a linha com espaços e adiciona um espaço no início
     }
   }
 
   // Se não há alerta, anima o spinner. Isso é feito fora do bloco 'if' anterior
   // para que a animação continue a cada ciclo, mas o texto não seja reescrito.
   if (!isLowPh) {
-    lcd.setCursor(12, 0); // Posição para o spinner
+    lcd.setCursor(13, 0); // Posição para o spinner (deslocado para a direita)
     lcd.print(spinner[spinnerPos]);
     spinnerPos = (spinnerPos + 1) % 4;
   }
