@@ -1,0 +1,100 @@
+/*
+ * CONTROLADOR AUTOMÁTICO DE PH PARA CULTIVO HIDROPÔNICO
+ * Desenvolvido para Arduino NANO
+ * 
+ * Este sistema monitora e controla automaticamente o pH de soluções nutritivas
+ * para cultivo hidropônico, com interface LCD e controle via botões touch.
+ * 
+ * COMPONENTES:
+ * - Arduino NANO
+ * - Display LCD I2C 20x4
+ * - Sensor de pH analógico com sonda
+ * - Sensor de temperatura DS18B20
+ * - ADS1115 (Conversor A/D 16-bit)
+ * - Módulo MOSFET 15A
+ * - Bomba peristáltica 5V
+ * - 3 botões touch
+ * - LED indicador
+ * 
+ * Autor: Sistema Emergent
+ * Data: Agosto 2025
+ */
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <Adafruit_ADS1X15.h>
+#include <EEPROM.h>
+#include <avr/wdt.h>
+
+// ==================== DEFINIÇÕES DE PINOS ====================
+#define PIN_DS18B20         2    // Sensor de temperatura
+#define PIN_BTN_MENU        3    // Botão MENU (touch)
+#define PIN_BTN_DOWN        4    // Botão DOWN (touch)
+#define PIN_BTN_UP          5    // Botão UP (touch)
+#define PIN_MOSFET          6    // Controle da bomba via MOSFET
+#define PIN_LED             7    // LED indicador
+// Pinos I2C: A4 (SDA), A5 (SCL) - LCD e ADS1115
+
+// ==================== CONSTANTES DO SISTEMA ====================
+// Endereços EEPROM para armazenar configurações
+#define EEPROM_PH_IDEAL     0    // float (4 bytes)
+#define EEPROM_CAL_OFFSET   4    // float (4 bytes) 
+#define EEPROM_CAL_SLOPE    8    // float (4 bytes)
+#define EEPROM_INITIALIZED  12   // byte (1 byte) - marca se EEPROM foi inicializada
+
+// Valores padrão
+#define PH_IDEAL_DEFAULT    7.0f
+#define PH_MIN              1.0f
+#define PH_MAX              13.0f
+#define PH_STEP             0.1f
+#define PH_TOLERANCE        0.3f  // Tolerância para detecção de variação
+#define PH_STABILITY        0.1f  // Tolerância para estabilidade
+
+// Tempos (em milissegundos)
+#define TEMPO_INATIVIDADE   30000UL  // 30 segundos para retornar à tela inicial
+#define TEMPO_BOMBA         1000UL   // 1 segundo acionamento da bomba
+#define TEMPO_ESPERA_BOMBA  300000UL // 5 minutos entre acionamentos da bomba
+#define INTERVALO_LEITURA   1000UL   // 1 segundo entre leituras
+#define INTERVALO_MEDIA     15000UL  // 15 segundos para atualizar média
+
+// Calibração
+#define AMOSTRAS_CALIBRACAO 15       // Número de amostras para calibração
+#define MAX_TENTATIVAS_CAL  5        // Máximo de tentativas de calibração
+#define DESCARTAR_EXTREMOS  2        // Quantas amostras extremas descartar
+
+// Estados do sistema
+enum EstadoSistema {
+  INICIALIZANDO,
+  MENU_INICIAL,
+  MONITORANDO,
+  MENU_PRINCIPAL,
+  DEFINIR_PH_IDEAL,
+  CALIBRAR_SONDA,
+  CAL_1_PONTO,
+  CAL_2_PONTOS,
+  CAL_SELECAO_SOL1,
+  CAL_SELECAO_SOL2,
+  CAL_MEDINDO,
+  MENU_TECNICO,
+  VALORES_BRUTOS,
+  CHECAR_SENSORES,
+  REINICIAR_SISTEMA
+};
+
+// ==================== OBJETOS GLOBAIS ====================
+LiquidCrystal_I2C lcd(0x27, 20, 4);  // Display LCD I2C
+OneWire oneWire(PIN_DS18B20);         // Comunicação OneWire
+DallasTemperature sensorTemp(&oneWire); // Sensor de temperatura
+Adafruit_ADS1115 ads;                // Conversor A/D
+
+// ==================== VARIÁVEIS GLOBAIS ====================
+// Estado do sistema
+EstadoSistema estadoAtual = INICIALIZANDO;
+EstadoSistema estadoAnterior = INICIALIZANDO;
+
+// Variáveis de tempo
+unsigned long tempoAtual = 0;
+unsigned long tempoUltimaAtividade = 0;
+unsigned long tempoUltimaLeitura = 0;
