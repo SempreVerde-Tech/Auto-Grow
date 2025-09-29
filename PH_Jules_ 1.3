@@ -858,10 +858,35 @@ void handleTechMenu() {
 /**
  * @brief Gerencia a tela de valores brutos.
  */
+void drawTechRawValuesLayout() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("   VALORES BRUTOS   "));
+    lcd.setCursor(0, 1);
+    lcd.print(F("pH(V): "));
+    lcd.setCursor(0, 2);
+    lcd.print(F("Temp(C): "));
+    lcd.setCursor(0, 3);
+    lcd.print(F("MENU para Voltar"));
+}
+
+void updateTechRawValues() {
+    // Atualiza o valor de Tensão do pH
+    lcd.setCursor(7, 1);
+    lcd.print(ads.computeVolts(ads.readADC_SingleEnded(ADS_CHANNEL_PH)), 4);
+
+    // Atualiza o valor da Temperatura
+    lcd.setCursor(9, 2);
+    lcd.print(currentTemperature, 2);
+}
+
 void handleTechRawValues() {
-    // This screen shows live data, so it must be redrawn continuously.
-    // No anti-flicker logic here.
-    displayTechRawValues();
+    if (screenNeedsRedraw) {
+        drawTechRawValuesLayout();
+        screenNeedsRedraw = false;
+    }
+    updateTechRawValues(); // Atualiza os valores continuamente
+
     if (btnMenuPressed) {
         currentState = STATE_TECH_MENU;
         screenNeedsRedraw = true;
@@ -986,6 +1011,9 @@ void activatePump() {
 
   // Reseta o histórico de pH para evitar ações repetidas com dados antigos
   for(int i=0; i<3; i++) stablePhHistory[i] = config.phIdeal;
+
+  // Força o redesenho da tela de monitoramento para limpar a mensagem da bomba
+  screenNeedsRedraw = true;
 }
 
 
@@ -1076,11 +1104,15 @@ void updateMonitoringValues() {
         wasLowPh = true;
     }
   } else {
-    if (wasLowPh) { // Se o status de pH baixo foi desativado, redesenha o título
+    // Se não há aviso, exibe o título normal e o spinner.
+    if (wasLowPh) { // Se o status de pH baixo foi desativado, precisa limpar a linha inteira.
       lcd.setCursor(0, 0);
-      lcd.print(F("MONITORANDO           ")); // Limpa a linha
+      lcd.print(F("                    "));
       wasLowPh = false;
     }
+    // Redesenha o título e o spinner para garantir que não haja corrupção e para animar.
+    lcd.setCursor(0, 0);
+    lcd.print(F("MONITORANDO"));
     lcd.setCursor(12, 0); // Posição para o spinner
     lcd.print(spinner[spinnerPos]);
     spinnerPos = (spinnerPos + 1) % 4;
@@ -1258,20 +1290,6 @@ void displayTechMenu() {
             lcd.print(options[optionIndex]);
         }
     }
-}
-
-void displayTechRawValues() {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(F("   VALORES BRUTOS   "));
-    lcd.setCursor(0, 1);
-    lcd.print(F("pH(V): "));
-    lcd.print(ads.computeVolts(ads.readADC_SingleEnded(ADS_CHANNEL_PH)), 4);
-    lcd.setCursor(0, 2);
-    lcd.print(F("Temp(C): "));
-    lcd.print(currentTemperature, 2);
-    lcd.setCursor(0, 3);
-    lcd.print(F("MENU para Voltar"));
 }
 
 void displaySensorCheckScreen() {
