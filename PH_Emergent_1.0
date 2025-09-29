@@ -1,0 +1,1319 @@
+
+Action: file_editor view /app/Controlador_PH_Automatico.ino
+Observation: /app/Controlador_PH_Automatico.ino:
+1|/*
+2| * CONTROLADOR AUTOMÁTICO DE PH PARA CULTIVO HIDROPÔNICO
+3| * Desenvolvido para Arduino NANO
+4| * 
+5| * Este sistema monitora e controla automaticamente o pH de soluções nutritivas
+6| * para cultivo hidropônico, com interface LCD e controle via botões touch.
+7| * 
+8| * COMPONENTES:
+9| * - Arduino NANO
+10| * - Display LCD I2C 20x4
+11| * - Sensor de pH analógico com sonda
+12| * - Sensor de temperatura DS18B20
+13| * - ADS1115 (Conversor A/D 16-bit)
+14| * - Módulo MOSFET 15A
+15| * - Bomba peristáltica 5V
+16| * - 3 botões touch
+17| * - LED indicador
+18| * 
+19| * Autor: Sistema Emergent
+20| * Data: Agosto 2025
+21| */
+22|
+23|#include <Wire.h>
+24|#include <LiquidCrystal_I2C.h>
+25|#include <OneWire.h>
+26|#include <DallasTemperature.h>
+27|#include <ADS1X15.h>
+28|#include <EEPROM.h>
+29|#include <avr/wdt.h>
+30|
+31|// ==================== DEFINIÇÕES DE PINOS ====================
+32|#define PIN_DS18B20         2    // Sensor de temperatura
+33|#define PIN_BTN_MENU        3    // Botão MENU (touch)
+34|#define PIN_BTN_DOWN        4    // Botão DOWN (touch)
+35|#define PIN_BTN_UP          5    // Botão UP (touch)
+36|#define PIN_MOSFET          6    // Controle da bomba via MOSFET
+37|#define PIN_LED             7    // LED indicador
+38|// Pinos I2C: A4 (SDA), A5 (SCL) - LCD e ADS1115
+39|
+40|// ==================== CONSTANTES DO SISTEMA ====================
+41|// Endereços EEPROM para armazenar configurações
+42|#define EEPROM_PH_IDEAL     0    // float (4 bytes)
+43|#define EEPROM_CAL_OFFSET   4    // float (4 bytes) 
+44|#define EEPROM_CAL_SLOPE    8    // float (4 bytes)
+45|#define EEPROM_INITIALIZED  12   // byte (1 byte) - marca se EEPROM foi inicializada
+46|
+47|// Valores padrão
+48|#define PH_IDEAL_DEFAULT    7.0f
+49|#define PH_MIN              1.0f
+50|#define PH_MAX              13.0f
+51|#define PH_STEP             0.1f
+52|#define PH_TOLERANCE        0.3f  // Tolerância para detecção de variação
+53|#define PH_STABILITY        0.1f  // Tolerância para estabilidade
+54|
+55|// Tempos (em milissegundos)
+56|#define TEMPO_INATIVIDADE   30000UL  // 30 segundos para retornar à tela inicial
+57|#define TEMPO_BOMBA         1000UL   // 1 segundo acionamento da bomba
+58|#define TEMPO_ESPERA_BOMBA  300000UL // 5 minutos entre acionamentos da bomba
+59|#define INTERVALO_LEITURA   1000UL   // 1 segundo entre leituras
+60|#define INTERVALO_MEDIA     15000UL  // 15 segundos para atualizar média
+61|
+62|// Calibração
+63|#define AMOSTRAS_CALIBRACAO 15       // Número de amostras para calibração
+64|#define MAX_TENTATIVAS_CAL  5        // Máximo de tentativas de calibração
+65|#define DESCARTAR_EXTREMOS  2        // Quantas amostras extremas descartar
+66|
+67|// Estados do sistema
+68|enum EstadoSistema {
+69|  INICIALIZANDO,
+70|  MENU_INICIAL,
+71|  MONITORANDO,
+72|  MENU_PRINCIPAL,
+73|  DEFINIR_PH_IDEAL,
+74|  CALIBRAR_SONDA,
+75|  CAL_1_PONTO,
+76|  CAL_2_PONTOS,
+77|  CAL_SELECAO_SOL1,
+78|  CAL_SELECAO_SOL2,
+79|  CAL_MEDINDO,
+80|  MENU_TECNICO,
+81|  VALORES_BRUTOS,
+82|  CHECAR_SENSORES,
+83|  REINICIAR_SISTEMA
+84|};
+85|
+86|// ==================== OBJETOS GLOBAIS ====================
+87|LiquidCrystal_I2C lcd(0x27, 20, 4);  // Display LCD I2C
+88|OneWire oneWire(PIN_DS18B20);         // Comunicação OneWire
+89|DallasTemperature sensorTemp(&oneWire); // Sensor de temperatura
+90|ADS1115 ads(0x48);                    // Conversor A/D
+91|
+92|// ==================== VARIÁVEIS GLOBAIS ====================
+93|// Estado do sistema
+94|EstadoSistema estadoAtual = INICIALIZANDO;
+95|EstadoSistema estadoAnterior = INICIALIZANDO;
+96|
+97|// Variáveis de tempo
+98|unsigned long tempoAtual = 0;
+99|unsigned long tempoUltimaAtividade = 0;
+100|unsigned long tempoUltimaLeitura = 0;
+101|unsigned long tempoUltimaMedia = 0;
+102|unsigned long tempoUltimaBomba = 0;
+103|
+104|// Variáveis de pH e temperatura
+105|float phAtual = 7.0f;
+106|float phInstantaneo = 7.0f;
+107|float phIdeal = PH_IDEAL_DEFAULT;
+108|float temperatura = 25.0f;
+109|float tensaoBrutaPh = 0.0f;
+110|
+111|// Arrays para médias
+112|float leiturasPh[AMOSTRAS_CALIBRACAO];
+113|int indiceLeitura = 0;
+114|bool arrayPreenchido = false;
+115|
+116|// Calibração
+117|float offsetCalibracao = 0.0f;
+118|float slopeCalibracao = 1.0f;
+119|bool sondaCalibrada = false;
+120|
+121|// Controle de botões
+122|bool btnMenuPressed = false;
+123|bool btnUpPressed = false;
+124|bool btnDownPressed = false;
+125|unsigned long tempoDebounce = 0;
+126|#define DEBOUNCE_DELAY 50
+127|
+128|// Controle do sistema
+129|bool sistemaEstavel = false;
+130|int contadorEstabilidade = 0;
+131|bool bombaAtiva = false;
+132|bool alertaPh = false;
+133|
+134|// Menus
+135|int opcaoMenuPrincipal = 0;
+136|int opcaoMenuInicial = 0;
+137|int opcaoMenuTecnico = 0;
+138|int opcaoSolucaoCalPH = 0;
+139|float valoresSolucoes[] = {4.01f, 7.01f, 10.1f};
+140|int numSolucoes = 3;
+141|
+142|// Barra de progresso
+143|int posicaoBarraProgress = 0;
+144|unsigned long tempoUltimaBarraUpdate = 0;
+145|
+146|// ==================== CONFIGURAÇÃO INICIAL ====================
+147|void setup() {
+148|  // Inicializar watchdog timer (8 segundos)
+149|  wdt_enable(WDTO_8S);
+150|  
+151|  // Inicializar Serial para debug (opcional)
+152|  Serial.begin(9600);
+153|  
+154|  // Configurar pinos
+155|  pinMode(PIN_BTN_MENU, INPUT_PULLUP);
+156|  pinMode(PIN_BTN_DOWN, INPUT_PULLUP);
+157|  pinMode(PIN_BTN_UP, INPUT_PULLUP);
+158|  pinMode(PIN_MOSFET, OUTPUT);
+159|  pinMode(PIN_LED, OUTPUT);
+160|  
+161|  digitalWrite(PIN_MOSFET, LOW);  // Bomba desligada
+162|  digitalWrite(PIN_LED, LOW);     // LED desligado
+163|  
+164|  // Inicializar I2C
+165|  Wire.begin();
+166|  
+167|  // Inicializar LCD
+168|  lcd.init();
+169|  lcd.backlight();
+170|  lcd.clear();
+171|  
+172|  // Mensagem de inicialização
+173|  lcd.setCursor(0, 0);
+174|  lcd.print("CONTROLADOR PH v1.0");
+175|  lcd.setCursor(0, 1);
+176|  lcd.print("Inicializando...");
+177|  
+178|  // Inicializar ADS1115
+179|  if (!ads.begin()) {
+180|    lcd.setCursor(0, 2);
+181|    lcd.print("ERRO: ADS1115");
+182|    while (1) {
+183|      wdt_reset(); // Prevenir reset do watchdog
+184|      delay(100);
+185|    }
+186|  }
+187|  ads.setGain(0);  // +/- 6.144V range
+188|  
+189|  // Inicializar sensor de temperatura
+190|  sensorTemp.begin();
+191|  if (sensorTemp.getDeviceCount() == 0) {
+192|    lcd.setCursor(0, 2);
+193|    lcd.print("ERRO: Sensor Temp");
+194|    while (1) {
+195|      wdt_reset();
+196|      delay(100);
+197|    }
+198|  }
+199|  
+200|  // Carregar configurações da EEPROM
+201|  carregarConfiguracoes();
+202|  
+203|  // Aguardar estabilização dos sensores
+204|  lcd.setCursor(0, 2);
+205|  lcd.print("Estabilizando...");
+206|  for (int i = 0; i < 30; i++) {
+207|    wdt_reset();
+208|    delay(100);
+209|  }
+210|  
+211|  // Ir para menu inicial
+212|  estadoAtual = MENU_INICIAL;
+213|  mostrarMenuInicial();
+214|  tempoUltimaAtividade = millis();
+215|  
+216|  Serial.println("Sistema inicializado com sucesso");
+217|}
+218|
+219|// ==================== LOOP PRINCIPAL ====================
+220|void loop() {
+221|  wdt_reset(); // Alimentar watchdog
+222|  
+223|  tempoAtual = millis();
+224|  
+225|  // Ler botões
+226|  lerBotoes();
+227|  
+228|  // Máquina de estados
+229|  switch (estadoAtual) {
+230|    case MENU_INICIAL:
+231|      processarMenuInicial();
+232|      break;
+233|      
+234|    case MONITORANDO:
+235|      processarMonitoramento();
+236|      break;
+237|      
+238|    case MENU_PRINCIPAL:
+239|      processarMenuPrincipal();
+240|      break;
+241|      
+242|    case DEFINIR_PH_IDEAL:
+243|      processarDefinirPhIdeal();
+244|      break;
+245|      
+246|    case CALIBRAR_SONDA:
+247|      processarMenuCalibracao();
+248|      break;
+249|      
+250|    case CAL_SELECAO_SOL1:
+251|      processarSelecaoSolucao1();
+252|      break;
+253|      
+254|    case CAL_SELECAO_SOL2:
+255|      processarSelecaoSolucao2();
+256|      break;
+257|      
+258|    case CAL_MEDINDO:
+259|      processarCalibracao();
+260|      break;
+261|      
+262|    case MENU_TECNICO:
+263|      processarMenuTecnico();
+264|      break;
+265|      
+266|    case VALORES_BRUTOS:
+267|      processarValoresBrutos();
+268|      break;
+269|      
+270|    case CHECAR_SENSORES:
+271|      processarChecarSensores();
+272|      break;
+273|      
+274|    case REINICIAR_SISTEMA:
+275|      processarReiniciarSistema();
+276|      break;
+277|  }
+278|  
+279|  // Verificar timeout de inatividade
+280|  verificarTimeoutInatividade();
+281|  
+282|  // Atualizar barra de progresso se necessário
+283|  atualizarBarraProgress();
+284|}
+285|
+286|// ==================== FUNÇÕES DE LEITURA DE SENSORES ====================
+287|
+288|/**
+289| * Lê a temperatura do sensor DS18B20
+290| * @return temperatura em graus Celsius
+291| */
+292|float lerTemperatura() {
+293|  sensorTemp.requestTemperatures();
+294|  float temp = sensorTemp.getTempCByIndex(0);
+295|  
+296|  // Verificar se a leitura é válida
+297|  if (temp == DEVICE_DISCONNECTED_C || temp < -55 || temp > 125) {
+298|    return 25.0f; // Valor padrão em caso de erro
+299|  }
+300|  
+301|  return temp;
+302|}
+303|
+304|/**
+305| * Lê a tensão bruta do sensor de pH através do ADS1115
+306| * @return tensão em volts
+307| */
+308|float lerTensaoBrutaPH() {
+309|  int16_t valorADC = ads.readADC(0);  // Canal A0
+310|  float tensao = ads.computeVolts(valorADC);
+311|  
+312|  // Limitar tensão dentro do range esperado
+313|  if (tensao < 0) tensao = 0;
+314|  if (tensao > 5.0) tensao = 5.0;
+315|  
+316|  return tensao;
+317|}
+318|
+319|/**
+320| * Converte tensão bruta em valor de pH, compensado por temperatura
+321| * @param tensao tensão lida do sensor
+322| * @param temp temperatura atual
+323| * @return valor de pH
+324| */
+325|float converterTensaoParaPH(float tensao, float temp) {
+326|  // Compensação de temperatura (coeficiente típico: -0.0198 pH/°C)
+327|  float compensacaoTemp = (temp - 25.0f) * (-0.0198f);
+328|  
+329|  // Conversão básica: assumindo sensor com saída linear
+330|  // pH 7 = ~2.5V, inclinação típica: ~0.18V/pH
+331|  float phBase = 7.0f - ((tensao - 2.5f) / 0.18f);
+332|  
+333|  // Aplicar calibração se disponível
+334|  float phFinal = (phBase + offsetCalibracao) * slopeCalibracao;
+335|  
+336|  // Aplicar compensação de temperatura
+337|  phFinal += compensacaoTemp;
+338|  
+339|  // Limitar pH dentro do range válido
+340|  if (phFinal < PH_MIN) phFinal = PH_MIN;
+341|  if (phFinal > PH_MAX) phFinal = PH_MAX;
+342|  
+343|  return phFinal;
+344|}
+345|
+346|/**
+347| * Realiza múltiplas leituras de pH e calcula a média descartando extremos
+348| * @return valor médio de pH
+349| */
+350|float lerPhComMedia() {
+351|  float leituras[AMOSTRAS_CALIBRACAO];
+352|  
+353|  // Coletar amostras
+354|  for (int i = 0; i < AMOSTRAS_CALIBRACAO; i++) {
+355|    temperatura = lerTemperatura();
+356|    tensaoBrutaPh = lerTensaoBrutaPH();
+357|    leituras[i] = converterTensaoParaPH(tensaoBrutaPh, temperatura);
+358|    
+359|    if (i < AMOSTRAS_CALIBRACAO - 1) {
+360|      delay(1000); // Aguardar 1 segundo entre leituras
+361|      wdt_reset();
+362|    }
+363|  }
+364|  
+365|  // Ordenar array para descartar extremos
+366|  for (int i = 0; i < AMOSTRAS_CALIBRACAO - 1; i++) {
+367|    for (int j = i + 1; j < AMOSTRAS_CALIBRACAO; j++) {
+368|      if (leituras[i] > leituras[j]) {
+369|        float temp = leituras[i];
+370|        leituras[i] = leituras[j];
+371|        leituras[j] = temp;
+372|      }
+373|    }
+374|  }
+375|  
+376|  // Calcular média descartando extremos
+377|  float soma = 0;
+378|  int contagem = 0;
+379|  for (int i = DESCARTAR_EXTREMOS; i < AMOSTRAS_CALIBRACAO - DESCARTAR_EXTREMOS; i++) {
+380|    soma += leituras[i];
+381|    contagem++;
+382|  }
+383|  
+384|  return (contagem > 0) ? soma / contagem : 7.0f;
+385|}
+386|
+387|// ==================== FUNÇÕES DE INTERFACE ====================
+388|
+389|/**
+390| * Lê o estado dos botões com debounce
+391| */
+392|void lerBotoes() {
+393|  static bool ultimoEstadoMenu = HIGH;
+394|  static bool ultimoEstadoUp = HIGH;
+395|  static bool ultimoEstadoDown = HIGH;
+396|  
+397|  bool estadoAtualMenu = digitalRead(PIN_BTN_MENU);
+398|  bool estadoAtualUp = digitalRead(PIN_BTN_UP);
+399|  bool estadoAtualDown = digitalRead(PIN_BTN_DOWN);
+400|  
+401|  // Debounce
+402|  if (tempoAtual - tempoDebounce > DEBOUNCE_DELAY) {
+403|    // Botão MENU
+404|    if (ultimoEstadoMenu == HIGH && estadoAtualMenu == LOW) {
+405|      btnMenuPressed = true;
+406|      tempoUltimaAtividade = tempoAtual;
+407|      tempoDebounce = tempoAtual;
+408|    }
+409|    
+410|    // Botão UP
+411|    if (ultimoEstadoUp == HIGH && estadoAtualUp == LOW) {
+412|      btnUpPressed = true;
+413|      tempoUltimaAtividade = tempoAtual;
+414|      tempoDebounce = tempoAtual;
+415|    }
+416|    
+417|    // Botão DOWN
+418|    if (ultimoEstadoDown == HIGH && estadoAtualDown == LOW) {
+419|      btnDownPressed = true;
+420|      tempoUltimaAtividade = tempoAtual;
+421|      tempoDebounce = tempoAtual;
+422|    }
+423|    
+424|    ultimoEstadoMenu = estadoAtualMenu;
+425|    ultimoEstadoUp = estadoAtualUp;
+426|    ultimoEstadoDown = estadoAtualDown;
+427|  }
+428|}
+429|
+430|/**
+431| * Limpa todas as flags de botões pressionados
+432| */
+433|void limparBotoes() {
+434|  btnMenuPressed = false;
+435|  btnUpPressed = false;
+436|  btnDownPressed = false;
+437|}
+438|
+439|/**
+440| * Mostra o menu inicial com 3 opções
+441| */
+442|void mostrarMenuInicial() {
+443|  lcd.clear();
+444|  lcd.setCursor(0, 0);
+445|  lcd.print("   MENU INICIAL");
+446|  
+447|  // Opções do menu
+448|  const char* opcoes[] = {"Monitorar", "Calibrar Sonda", "Menu Tecnico"};
+449|  
+450|  for (int i = 0; i < 3; i++) {
+451|    lcd.setCursor(0, i + 1);
+452|    if (i == opcaoMenuInicial) {
+453|      lcd.print("> ");
+454|    } else {
+455|      lcd.print("  ");
+456|    }
+457|    lcd.print(opcoes[i]);
+458|  }
+459|}
+460|
+461|/**
+462| * Mostra a tela de monitoramento com informações do sistema
+463| */
+464|void mostrarTelaMonitoramento() {
+465|  lcd.clear();
+466|  
+467|  // Linha 1: MONITORANDO com barra giratória
+468|  lcd.setCursor(0, 0);
+469|  lcd.print("MONITORANDO ");
+470|  static char barrinha[] = {'-', '\\', '|', '/'};
+471|  static int posBarrinha = 0;
+472|  lcd.print(barrinha[posBarrinha]);
+473|  posBarrinha = (posBarrinha + 1) % 4;
+474|  
+475|  // Verificar se há alerta de pH
+476|  if (alertaPh) {
+477|    lcd.setCursor(14, 0);
+478|    lcd.print("PH<IDA");
+479|  }
+480|  
+481|  // Linha 2: pH ATUAL
+482|  lcd.setCursor(0, 1);
+483|  lcd.print("PH ATUAL: ");
+484|  lcd.print(phAtual, 1);
+485|  
+486|  // Linha 3: pH INST
+487|  lcd.setCursor(0, 2);
+488|  lcd.print("PH INST: ");
+489|  lcd.print(phInstantaneo, 1);
+490|  
+491|  // Linha 4: Temperatura e pH Ideal
+492|  lcd.setCursor(0, 3);
+493|  lcd.print("Temp:");
+494|  lcd.print(temperatura, 1);
+495|  lcd.print("C|Ideal:");
+496|  lcd.print(phIdeal, 1);
+497|}
+498|
+499|/**
+500| * Mostra o menu principal
+501| */
+502|void mostrarMenuPrincipal() {
+503|  lcd.clear();
+504|  lcd.setCursor(0, 0);
+505|  lcd.print("  MENU PRINCIPAL");
+506|  
+507|  const char* opcoes[] = {"Definir PH Ideal", "Calibrar Sonda", "Menu Tecnico", "Voltar"};
+508|  
+509|  for (int i = 0; i < 4; i++) {
+510|    lcd.setCursor(0, i + 1);
+511|    if (i == opcaoMenuPrincipal) {
+512|      lcd.print(">");
+513|    } else {
+514|      lcd.print(" ");
+515|    }
+516|    
+517|    if (i < 3) {
+518|      lcd.print(opcoes[i]);
+519|    } else {
+520|      lcd.setCursor(1, 3);
+521|      lcd.print("Voltar");
+522|    }
+523|  }
+524|}
+525|
+526|/**
+527| * Atualiza a barra de progresso giratória
+528| */
+529|void atualizarBarraProgress() {
+530|  if (tempoAtual - tempoUltimaBarraUpdate > 200) {
+531|    posicaoBarraProgress = (posicaoBarraProgress + 1) % 10;
+532|    tempoUltimaBarraUpdate = tempoAtual;
+533|  }
+534|}
+535|
+536|// ==================== PROCESSAMENTO DE ESTADOS ====================
+537|
+538|/**
+539| * Processa o menu inicial
+540| */
+541|void processarMenuInicial() {
+542|  if (btnUpPressed) {
+543|    opcaoMenuInicial = (opcaoMenuInicial - 1 + 3) % 3;
+544|    mostrarMenuInicial();
+545|    limparBotoes();
+546|  }
+547|  
+548|  if (btnDownPressed) {
+549|    opcaoMenuInicial = (opcaoMenuInicial + 1) % 3;
+550|    mostrarMenuInicial();
+551|    limparBotoes();
+552|  }
+553|  
+554|  if (btnMenuPressed) {
+555|    switch (opcaoMenuInicial) {
+556|      case 0: // Monitorar
+557|        estadoAtual = MONITORANDO;
+558|        mostrarTelaMonitoramento();
+559|        break;
+560|      case 1: // Calibrar Sonda
+561|        estadoAtual = CALIBRAR_SONDA;
+562|        mostrarMenuCalibracao();
+563|        break;
+564|      case 2: // Menu Técnico
+565|        estadoAtual = MENU_TECNICO;
+566|        opcaoMenuTecnico = 0;
+567|        mostrarMenuTecnico();
+568|        break;
+569|    }
+570|    limparBotoes();
+571|  }
+572|}
+573|
+574|/**
+575| * Processa o monitoramento contínuo
+576| */
+577|void processarMonitoramento() {
+578|  // Atualizar leituras instantâneas a cada segundo
+579|  if (tempoAtual - tempoUltimaLeitura >= INTERVALO_LEITURA) {
+580|    temperatura = lerTemperatura();
+581|    tensaoBrutaPh = lerTensaoBrutaPH();
+582|    phInstantaneo = converterTensaoParaPH(tensaoBrutaPh, temperatura);
+583|    
+584|    // Adicionar leitura ao array circular
+585|    leiturasPh[indiceLeitura] = phInstantaneo;
+586|    indiceLeitura = (indiceLeitura + 1) % AMOSTRAS_CALIBRACAO;
+587|    if (indiceLeitura == 0) arrayPreenchido = true;
+588|    
+589|    tempoUltimaLeitura = tempoAtual;
+590|    mostrarTelaMonitoramento();
+591|  }
+592|  
+593|  // Atualizar média a cada 15 segundos
+594|  if (tempoAtual - tempoUltimaMedia >= INTERVALO_MEDIA && arrayPreenchido) {
+595|    calcularMediaPh();
+596|    verificarControlePh();
+597|    tempoUltimaMedia = tempoAtual;
+598|  }
+599|  
+600|  // Abrir menu principal se MENU pressionado
+601|  if (btnMenuPressed) {
+602|    estadoAtual = MENU_PRINCIPAL;
+603|    opcaoMenuPrincipal = 0;
+604|    mostrarMenuPrincipal();
+605|    limparBotoes();
+606|  }
+607|  
+608|  limparBotoes();
+609|}
+610|
+611|/**
+612| * Calcula a média do pH descartando extremos
+613| */
+614|void calcularMediaPh() {
+615|  if (!arrayPreenchido) return;
+616|  
+617|  // Copiar array para ordenação
+618|  float temp[AMOSTRAS_CALIBRACAO];
+619|  for (int i = 0; i < AMOSTRAS_CALIBRACAO; i++) {
+620|    temp[i] = leiturasPh[i];
+621|  }
+622|  
+623|  // Ordenar
+624|  for (int i = 0; i < AMOSTRAS_CALIBRACAO - 1; i++) {
+625|    for (int j = i + 1; j < AMOSTRAS_CALIBRACAO; j++) {
+626|      if (temp[i] > temp[j]) {
+627|        float aux = temp[i];
+628|        temp[i] = temp[j];
+629|        temp[j] = aux;
+630|      }
+631|    }
+632|  }
+633|  
+634|  // Calcular média sem extremos
+635|  float soma = 0;
+636|  for (int i = DESCARTAR_EXTREMOS; i < AMOSTRAS_CALIBRACAO - DESCARTAR_EXTREMOS; i++) {
+637|    soma += temp[i];
+638|  }
+639|  
+640|  phAtual = soma / (AMOSTRAS_CALIBRACAO - 2 * DESCARTAR_EXTREMOS);
+641|}
+642|
+643|/**
+644| * Verifica se é necessário controle de pH
+645| */
+646|void verificarControlePh() {
+647|  float diferenca = abs(phAtual - phIdeal);
+648|  
+649|  if (diferenca > PH_TOLERANCE) {
+650|    if (phAtual < phIdeal) {
+651|      // pH abaixo do ideal - acender LED e mostrar alerta
+652|      digitalWrite(PIN_LED, HIGH);
+653|      alertaPh = true;
+654|    } else {
+655|      // pH acima do ideal - ativar bomba se não foi ativada recentemente
+656|      if (tempoAtual - tempoUltimaBomba >= TEMPO_ESPERA_BOMBA) {
+657|        ativarBomba();
+658|      }
+659|    }
+660|  } else {
+661|    // pH dentro do ideal
+662|    digitalWrite(PIN_LED, LOW);
+663|    alertaPh = false;
+664|  }
+665|}
+666|
+667|/**
+668| * Ativa a bomba por um período determinado
+669| */
+670|void ativarBomba() {
+671|  lcd.clear();
+672|  lcd.setCursor(0, 0);
+673|  lcd.print("   AJUSTANDO PH");
+674|  
+675|  // Mostrar barra de progresso
+676|  lcd.setCursor(0, 2);
+677|  lcd.print("[");
+678|  for (int i = 0; i < 18; i++) {
+679|    lcd.print(" ");
+680|  }
+681|  lcd.print("]");
+682|  
+683|  digitalWrite(PIN_MOSFET, HIGH); // Ativar bomba
+684|  
+685|  unsigned long inicioAtivacao = millis();
+686|  while (millis() - inicioAtivacao < TEMPO_BOMBA) {
+687|    wdt_reset();
+688|    
+689|    // Atualizar barra de progresso
+690|    int progresso = ((millis() - inicioAtivacao) * 18) / TEMPO_BOMBA;
+691|    lcd.setCursor(1, 2);
+692|    for (int i = 0; i < progresso; i++) {
+693|      lcd.print("=");
+694|    }
+695|    
+696|    delay(50);
+697|  }
+698|  
+699|  digitalWrite(PIN_MOSFET, LOW); // Desativar bomba
+700|  tempoUltimaBomba = millis();
+701|  
+702|  // Mostrar mensagem de conclusão
+703|  lcd.clear();
+704|  lcd.setCursor(0, 1);
+705|  lcd.print("  AJUSTE COMPLETO");
+706|  delay(2000);
+707|  
+708|  mostrarTelaMonitoramento();
+709|}
+710|
+711|/**
+712| * Processa o menu principal
+713| */
+714|void processarMenuPrincipal() {
+715|  if (btnUpPressed) {
+716|    opcaoMenuPrincipal = (opcaoMenuPrincipal - 1 + 4) % 4;
+717|    mostrarMenuPrincipal();
+718|    limparBotoes();
+719|  }
+720|  
+721|  if (btnDownPressed) {
+722|    opcaoMenuPrincipal = (opcaoMenuPrincipal + 1) % 4;
+723|    mostrarMenuPrincipal();
+724|    limparBotoes();
+725|  }
+726|  
+727|  if (btnMenuPressed) {
+728|    switch (opcaoMenuPrincipal) {
+729|      case 0: // Definir pH Ideal
+730|        estadoAtual = DEFINIR_PH_IDEAL;
+731|        mostrarDefinirPhIdeal();
+732|        break;
+733|      case 1: // Calibrar Sonda
+734|        estadoAtual = CALIBRAR_SONDA;
+735|        mostrarMenuCalibracao();
+736|        break;
+737|      case 2: // Menu Técnico
+738|        estadoAtual = MENU_TECNICO;
+739|        opcaoMenuTecnico = 0;
+740|        mostrarMenuTecnico();
+741|        break;
+742|      case 3: // Voltar
+743|        estadoAtual = MONITORANDO;
+744|        mostrarTelaMonitoramento();
+745|        break;
+746|    }
+747|    limparBotoes();
+748|  }
+749|}
+750|
+751|/**
+752| * Mostra a tela para definir pH ideal
+753| */
+754|void mostrarDefinirPhIdeal() {
+755|  lcd.clear();
+756|  lcd.setCursor(0, 0);
+757|  lcd.print("  DEFINIR PH IDEAL");
+758|  lcd.setCursor(0, 2);
+759|  lcd.print("PH Ideal: ");
+760|  lcd.print(phIdeal, 1);
+761|  lcd.setCursor(0, 3);
+762|  lcd.print("Press. MENU p/ salvar");
+763|}
+764|
+765|/**
+766| * Processa a definição de pH ideal
+767| */
+768|void processarDefinirPhIdeal() {
+769|  if (btnUpPressed) {
+770|    phIdeal += PH_STEP;
+771|    if (phIdeal > PH_MAX) phIdeal = PH_MAX;
+772|    mostrarDefinirPhIdeal();
+773|    limparBotoes();
+774|  }
+775|  
+776|  if (btnDownPressed) {
+777|    phIdeal -= PH_STEP;
+778|    if (phIdeal < PH_MIN) phIdeal = PH_MIN;
+779|    mostrarDefinirPhIdeal();
+780|    limparBotoes();
+781|  }
+782|  
+783|  if (btnMenuPressed) {
+784|    // Salvar na EEPROM
+785|    salvarConfiguracoes();
+786|    
+787|    lcd.clear();
+788|    lcd.setCursor(0, 1);
+789|    lcd.print("  PH IDEAL SALVO!");
+790|    delay(2000);
+791|    
+792|    estadoAtual = MONITORANDO;
+793|    mostrarTelaMonitoramento();
+794|    limparBotoes();
+795|  }
+796|}
+797|
+798|/**
+799| * Mostra o menu de calibração
+800| */
+801|void mostrarMenuCalibracao() {
+802|  lcd.clear();
+803|  lcd.setCursor(0, 0);
+804|  lcd.print("  CALIBRAR SONDA");
+805|  
+806|  const char* opcoes[] = {"1 PONTO", "2 PONTOS", "Voltar"};
+807|  
+808|  for (int i = 0; i < 3; i++) {
+809|    lcd.setCursor(0, i + 1);
+810|    if (i == opcaoSolucaoCalPH) {
+811|      lcd.print("> ");
+812|    } else {
+813|      lcd.print("  ");
+814|    }
+815|    lcd.print(opcoes[i]);
+816|  }
+817|}
+818|
+819|/**
+820| * Processa o menu de calibração
+821| */
+822|void processarMenuCalibracao() {
+823|  if (btnUpPressed) {
+824|    opcaoSolucaoCalPH = (opcaoSolucaoCalPH - 1 + 3) % 3;
+825|    mostrarMenuCalibracao();
+826|    limparBotoes();
+827|  }
+828|  
+829|  if (btnDownPressed) {
+830|    opcaoSolucaoCalPH = (opcaoSolucaoCalPH + 1) % 3;
+831|    mostrarMenuCalibracao();
+832|    limparBotoes();
+833|  }
+834|  
+835|  if (btnMenuPressed) {
+836|    switch (opcaoSolucaoCalPH) {
+837|      case 0: // 1 PONTO
+838|        estadoAtual = CAL_SELECAO_SOL1;
+839|        opcaoSolucaoCalPH = 0;
+840|        mostrarSelecaoSolucao("SELECIONE SOLUCAO:");
+841|        break;
+842|      case 1: // 2 PONTOS
+843|        estadoAtual = CAL_SELECAO_SOL1;
+844|        opcaoSolucaoCalPH = 0;
+845|        mostrarSelecaoSolucao("SELECIONE SOLUCAO 1:");
+846|        break;
+847|      case 2: // Voltar
+848|        estadoAtual = MENU_PRINCIPAL;
+849|        mostrarMenuPrincipal();
+850|        break;
+851|    }
+852|    limparBotoes();
+853|  }
+854|}
+855|
+856|/**
+857| * Mostra a seleção de solução para calibração
+858| */
+859|void mostrarSelecaoSolucao(const char* titulo) {
+860|  lcd.clear();
+861|  lcd.setCursor(0, 0);
+862|  lcd.print(titulo);
+863|  
+864|  for (int i = 0; i < numSolucoes; i++) {
+865|    lcd.setCursor(0, i + 1);
+866|    if (i == opcaoSolucaoCalPH) {
+867|      lcd.print("> ");
+868|    } else {
+869|      lcd.print("  ");
+870|    }
+871|    lcd.print(valoresSolucoes[i], 2);
+872|  }
+873|  
+874|  // Opção Voltar
+875|  lcd.setCursor(0, 3);
+876|  if (opcaoSolucaoCalPH == numSolucoes) {
+877|    lcd.print("> ");
+878|  } else {
+879|    lcd.print("  ");
+880|  }
+881|  lcd.print("Voltar");
+882|}
+883|
+884|/**
+885| * Processa seleção da primeira solução
+886| */
+887|void processarSelecaoSolucao1() {
+888|  if (btnUpPressed) {
+889|    opcaoSolucaoCalPH = (opcaoSolucaoCalPH - 1 + numSolucoes + 1) % (numSolucoes + 1);
+890|    mostrarSelecaoSolucao("SELECIONE SOLUCAO:");
+891|    limparBotoes();
+892|  }
+893|  
+894|  if (btnDownPressed) {
+895|    opcaoSolucaoCalPH = (opcaoSolucaoCalPH + 1) % (numSolucoes + 1);
+896|    mostrarSelecaoSolucao("SELECIONE SOLUCAO:");
+897|    limparBotoes();
+898|  }
+899|  
+900|  if (btnMenuPressed) {
+901|    if (opcaoSolucaoCalPH < numSolucoes) {
+902|      // Solução selecionada, iniciar calibração
+903|      estadoAtual = CAL_MEDINDO;
+904|      mostrarPreparaCalibracao(valoresSolucoes[opcaoSolucaoCalPH]);
+905|    } else {
+906|      // Voltar
+907|      estadoAtual = CALIBRAR_SONDA;
+908|      mostrarMenuCalibracao();
+909|    }
+910|    limparBotoes();
+911|  }
+912|}
+913|
+914|/**
+915| * Processa seleção da segunda solução (calibração 2 pontos)
+916| */
+917|void processarSelecaoSolucao2() {
+918|  // Similar à primeira, mas exclui a solução já selecionada
+919|  // Implementação similar à função anterior
+920|  // Para brevidade, implementação simplificada
+921|}
+922|
+923|/**
+924| * Mostra preparação para calibração
+925| */
+926|void mostrarPreparaCalibracao(float valorSolucao) {
+927|  lcd.clear();
+928|  lcd.setCursor(0, 0);
+929|  lcd.print("Insira sonda em");
+930|  lcd.setCursor(0, 1);
+931|  lcd.print("solucao pH ");
+932|  lcd.print(valorSolucao, 2);
+933|  lcd.setCursor(0, 3);
+934|  lcd.print("Press MENU qdo pronto");
+935|}
+936|
+937|/**
+938| * Processa o processo de calibração
+939| */
+940|void processarCalibracao() {
+941|  if (btnMenuPressed) {
+942|    realizarCalibracao();
+943|    limparBotoes();
+944|  }
+945|}
+946|
+947|/**
+948| * Realiza o processo de calibração completo
+949| */
+950|void realizarCalibracao() {
+951|  lcd.clear();
+952|  lcd.setCursor(0, 0);
+953|  lcd.print("  CALIBRANDO...");
+954|  
+955|  float media1, media2;
+956|  int tentativas = 0;
+957|  bool sucesso = false;
+958|  
+959|  while (tentativas < MAX_TENTATIVAS_CAL && !sucesso) {
+960|    wdt_reset();
+961|    
+962|    // Primeira média
+963|    lcd.setCursor(0, 1);
+964|    lcd.print("Medindo... 1/2");
+965|    media1 = lerPhComMedia();
+966|    
+967|    // Segunda média
+968|    lcd.setCursor(0, 1);
+969|    lcd.print("Medindo... 2/2");
+970|    media2 = lerPhComMedia();
+971|    
+972|    // Verificar estabilidade
+973|    if (abs(media1 - media2) <= PH_STABILITY) {
+974|      sucesso = true;
+975|      // Calcular offset de calibração
+976|      float valorReferencia = valoresSolucoes[opcaoSolucaoCalPH];
+977|      offsetCalibracao = valorReferencia - ((media1 + media2) / 2.0f);
+978|      
+979|      salvarConfiguracoes();
+980|      
+981|      lcd.clear();
+982|      lcd.setCursor(0, 1);
+983|      lcd.print("CALIBRACAO OK!");
+984|      delay(2000);
+985|    } else {
+986|      tentativas++;
+987|      lcd.setCursor(0, 2);
+988|      lcd.print("Tentativa ");
+989|      lcd.print(tentativas);
+990|      delay(1000);
+991|    }
+992|  }
+993|  
+994|  if (!sucesso) {
+995|    lcd.clear();
+996|    lcd.setCursor(0, 1);
+997|    lcd.print("ERRO CALIBRACAO");
+998|    lcd.setCursor(0, 2);
+999|    lcd.print("Tentar Novamente?");
+1000|    delay(3000);
+1001|  }
+1002|  
+1003|  estadoAtual = MONITORANDO;
+1004|  mostrarTelaMonitoramento();
+1005|}
+1006|
+1007|/**
+1008| * Mostra o menu técnico
+1009| */
+1010|void mostrarMenuTecnico() {
+1011|  lcd.clear();
+1012|  lcd.setCursor(0, 0);
+1013|  lcd.print("   MENU TECNICO");
+1014|  
+1015|  const char* opcoes[] = {"Valores Brutos", "Checar Sensores", "Reiniciar", "Voltar"};
+1016|  
+1017|  for (int i = 0; i < 4; i++) {
+1018|    lcd.setCursor(0, i + 1);
+1019|    if (i == opcaoMenuTecnico) {
+1020|      lcd.print("> ");
+1021|    } else {
+1022|      lcd.print("  ");
+1023|    }
+1024|    
+1025|    if (i < 3) {
+1026|      lcd.print(opcoes[i]);
+1027|    } else {
+1028|      lcd.setCursor(2, 3);
+1029|      lcd.print("Voltar");
+1030|    }
+1031|  }
+1032|}
+1033|
+1034|/**
+1035| * Processa o menu técnico
+1036| */
+1037|void processarMenuTecnico() {
+1038|  if (btnUpPressed) {
+1039|    opcaoMenuTecnico = (opcaoMenuTecnico - 1 + 4) % 4;
+1040|    mostrarMenuTecnico();
+1041|    limparBotoes();
+1042|  }
+1043|  
+1044|  if (btnDownPressed) {
+1045|    opcaoMenuTecnico = (opcaoMenuTecnico + 1) % 4;
+1046|    mostrarMenuTecnico();
+1047|    limparBotoes();
+1048|  }
+1049|  
+1050|  if (btnMenuPressed) {
+1051|    switch (opcaoMenuTecnico) {
+1052|      case 0: // Valores Brutos
+1053|        estadoAtual = VALORES_BRUTOS;
+1054|        mostrarValoresBrutos();
+1055|        break;
+1056|      case 1: // Checar Sensores
+1057|        estadoAtual = CHECAR_SENSORES;
+1058|        iniciarChecarSensores();
+1059|        break;
+1060|      case 2: // Reiniciar
+1061|        estadoAtual = REINICIAR_SISTEMA;
+1062|        mostrarReiniciarSistema();
+1063|        break;
+1064|      case 3: // Voltar
+1065|        estadoAtual = MENU_PRINCIPAL;
+1066|        mostrarMenuPrincipal();
+1067|        break;
+1068|    }
+1069|    limparBotoes();
+1070|  }
+1071|}
+1072|
+1073|/**
+1074| * Mostra valores brutos dos sensores
+1075| */
+1076|void mostrarValoresBrutos() {
+1077|  lcd.clear();
+1078|  lcd.setCursor(0, 0);
+1079|  lcd.print("  VALORES BRUTOS");
+1080|  
+1081|  tensaoBrutaPh = lerTensaoBrutaPH();
+1082|  temperatura = lerTemperatura();
+1083|  
+1084|  lcd.setCursor(0, 1);
+1085|  lcd.print("pH Tensao: ");
+1086|  lcd.print(tensaoBrutaPh, 3);
+1087|  lcd.print("V");
+1088|  
+1089|  lcd.setCursor(0, 2);
+1090|  lcd.print("Temperatura: ");
+1091|  lcd.print(temperatura, 1);
+1092|  lcd.print("C");
+1093|  
+1094|  lcd.setCursor(0, 3);
+1095|  lcd.print("MENU = Voltar");
+1096|}
+1097|
+1098|/**
+1099| * Processa visualização de valores brutos
+1100| */
+1101|void processarValoresBrutos() {
+1102|  // Atualizar a cada segundo
+1103|  if (tempoAtual - tempoUltimaLeitura >= 1000) {
+1104|    mostrarValoresBrutos();
+1105|    tempoUltimaLeitura = tempoAtual;
+1106|  }
+1107|  
+1108|  if (btnMenuPressed) {
+1109|    estadoAtual = MENU_TECNICO;
+1110|    mostrarMenuTecnico();
+1111|    limparBotoes();
+1112|  }
+1113|}
+1114|
+1115|/**
+1116| * Inicia verificação dos sensores
+1117| */
+1118|void iniciarChecarSensores() {
+1119|  lcd.clear();
+1120|  lcd.setCursor(0, 0);
+1121|  lcd.print(" TESTANDO SENSORES");
+1122|  lcd.setCursor(0, 1);
+1123|  lcd.print("[                  ]");
+1124|}
+1125|
+1126|/**
+1127| * Processa verificação dos sensores
+1128| */
+1129|void processarChecarSensores() {
+1130|  static int etapa = 0;
+1131|  static unsigned long tempoInicio = 0;
+1132|  
+1133|  if (etapa == 0) {
+1134|    tempoInicio = millis();
+1135|    etapa = 1;
+1136|  }
+1137|  
+1138|  unsigned long tempoDecorrido = millis() - tempoInicio;
+1139|  int progresso = (tempoDecorrido * 18) / 5000; // 5 segundos total
+1140|  
+1141|  if (progresso < 18) {
+1142|    lcd.setCursor(1, 1);
+1143|    for (int i = 0; i < progresso; i++) {
+1144|      lcd.print("=");
+1145|    }
+1146|  } else {
+1147|    // Teste concluído, mostrar resultados
+1148|    lcd.clear();
+1149|    lcd.setCursor(0, 0);
+1150|    lcd.print("RESULTADO DO TESTE:");
+1151|    
+1152|    // Testar sensor de temperatura
+1153|    temperatura = lerTemperatura();
+1154|    lcd.setCursor(0, 1);
+1155|    if (temperatura > -50 && temperatura < 100) {
+1156|      lcd.print("Temp: OK");
+1157|    } else {
+1158|      lcd.print("Temp: ERRO");
+1159|    }
+1160|    
+1161|    // Testar sensor de pH
+1162|    tensaoBrutaPh = lerTensaoBrutaPH();
+1163|    lcd.setCursor(11, 1);
+1164|    if (tensaoBrutaPh >= 0 && tensaoBrutaPh <= 5.0) {
+1165|      lcd.print("pH: OK");
+1166|    } else {
+1167|      lcd.print("pH:ERRO");
+1168|    }
+1169|    
+1170|    // Testar ADS1115
+1171|    lcd.setCursor(0, 2);
+1172|    if (ads.isConnected()) {
+1173|      lcd.print("ADS1115: OK");
+1174|    } else {
+1175|      lcd.print("ADS1115: ERRO");
+1176|    }
+1177|    
+1178|    lcd.setCursor(0, 3);
+1179|    lcd.print("MENU = Voltar");
+1180|    etapa = 0; // Reset para próxima vez
+1181|  }
+1182|  
+1183|  if (btnMenuPressed && progresso >= 18) {
+1184|    estadoAtual = MENU_TECNICO;
+1185|    mostrarMenuTecnico();
+1186|    limparBotoes();
+1187|  }
+1188|}
+1189|
+1190|/**
+1191| * Mostra opção de reiniciar sistema
+1192| */
+1193|void mostrarReiniciarSistema() {
+1194|  lcd.clear();
+1195|  lcd.setCursor(0, 1);
+1196|  lcd.print(" REINICIAR SISTEMA?");
+1197|  lcd.setCursor(0, 3);
+1198|  lcd.print("UP=SIM   DOWN=NAO");
+1199|}
+1200|
+1201|/**
+1202| * Processa opção de reinicialização
+1203| */
+1204|void processarReiniciarSistema() {
+1205|  if (btnUpPressed) {
+1206|    // Reiniciar sistema
+1207|    lcd.clear();
+1208|    lcd.setCursor(0, 1);
+1209|    lcd.print("  REINICIANDO...");
+1210|    delay(2000);
+1211|    
+1212|    // Resetar via watchdog
+1213|    wdt_enable(WDTO_15MS);
+1214|    while(1) {} // Aguardar reset
+1215|    
+1216|    limparBotoes();
+1217|  }
+1218|  
+1219|  if (btnDownPressed) {
+1220|    // Cancelar
+1221|    estadoAtual = MENU_TECNICO;
+1222|    mostrarMenuTecnico();
+1223|    limparBotoes();
+1224|  }
+1225|}
+1226|
+1227|// ==================== FUNÇÕES DE EEPROM ====================
+1228|
+1229|/**
+1230| * Carrega configurações da EEPROM
+1231| */
+1232|void carregarConfiguracoes() {
+1233|  // Verificar se EEPROM foi inicializada
+1234|  if (EEPROM.read(EEPROM_INITIALIZED) != 0xAA) {
+1235|    // Primeira inicialização - salvar valores padrão
+1236|    phIdeal = PH_IDEAL_DEFAULT;
+1237|    offsetCalibracao = 0.0f;
+1238|    slopeCalibracao = 1.0f;
+1239|    salvarConfiguracoes();
+1240|  } else {
+1241|    // Carregar valores salvos
+1242|    EEPROM.get(EEPROM_PH_IDEAL, phIdeal);
+1243|    EEPROM.get(EEPROM_CAL_OFFSET, offsetCalibracao);
+1244|    EEPROM.get(EEPROM_CAL_SLOPE, slopeCalibracao);
+1245|    
+1246|    // Verificar se valores são válidos
+1247|    if (phIdeal < PH_MIN || phIdeal > PH_MAX) {
+1248|      phIdeal = PH_IDEAL_DEFAULT;
+1249|    }
+1250|    
+1251|    Serial.print("Configurações carregadas - pH Ideal: ");
+1252|    Serial.println(phIdeal);
+1253|  }
+1254|}
+1255|
+1256|/**
+1257| * Salva configurações na EEPROM
+1258| */
+1259|void salvarConfiguracoes() {
+1260|  EEPROM.put(EEPROM_PH_IDEAL, phIdeal);
+1261|  EEPROM.put(EEPROM_CAL_OFFSET, offsetCalibracao);
+1262|  EEPROM.put(EEPROM_CAL_SLOPE, slopeCalibracao);
+1263|  EEPROM.write(EEPROM_INITIALIZED, 0xAA); // Marcar como inicializada
+1264|  
+1265|  Serial.println("Configurações salvas na EEPROM");
+1266|}
+1267|
+1268|// ==================== FUNÇÃO DE TIMEOUT ====================
+1269|
+1270|/**
+1271| * Verifica timeout de inatividade e retorna à tela inicial
+1272| */
+1273|void verificarTimeoutInatividade() {
+1274|  if (estadoAtual != MONITORANDO && estadoAtual != INICIALIZANDO) {
+1275|    if (tempoAtual - tempoUltimaAtividade >= TEMPO_INATIVIDADE) {
+1276|      estadoAtual = MONITORANDO;
+1277|      mostrarTelaMonitoramento();
+1278|    }
+1279|  }
+1280|}
+1281|
+1282|// ==================== FIM DO CÓDIGO ====================
+1283|
+1284|/*
+1285| * DEPENDÊNCIAS NECESSÁRIAS (instalar via Library Manager do Arduino IDE):
+1286| * 
+1287| * 1. LiquidCrystal_I2C - para controle do display LCD I2C
+1288| *    Autor: Frank de Brabander
+1289| *    
+1290| * 2. OneWire - para comunicação com sensor DS18B20
+1291| *    Autor: Jim Studt, Tom Pollard, Robin James, Paul Stoffregen
+1292| *    
+1293| * 3. DallasTemperature - biblioteca para sensor DS18B20
+1294| *    Autor: Miles Burton, Tim Newsome, Guil Barros, Rob Tillaart
+1295| *    
+1296| * 4. ADS1X15 - biblioteca para conversor A/D ADS1115
+1297| *    Autor: Rob Tillaart
+1298| * 
+1299| * NOTAS DE INSTALAÇÃO:
+1300| * - Todas as bibliotecas podem ser instaladas através do Library Manager
+1301| * - Vá em Sketch > Include Library > Manage Libraries
+1302| * - Busque pelo nome de cada biblioteca e instale
+1303| * - As bibliotecas Wire.h, EEPROM.h e avr/wdt.h já vêm com o Arduino IDE
+1304| * 
+1305| * CONFIGURAÇÃO DO HARDWARE:
+1306| * - Certifique-se de que todos os componentes estão conectados conforme o esquema
+1307| * - O endereço I2C do LCD (0x27) pode variar - use um scanner I2C se necessário
+1308| * - O ADS1115 deve estar configurado no endereço 0x48
+1309| * - Teste cada componente individualmente antes de carregar o código completo
+1310| * 
+1311| * CALIBRAÇÃO INICIAL:
+1312| * - Use soluções buffer de pH certificadas para calibração
+1313| * - Valores recomendados: pH 4.01, 7.01 e 10.01
+1314| * - Sempre calibre com a temperatura próxima à de operação
+1315| * - Mantenha as sondas limpas e armazenadas adequadamente
+1316| */
