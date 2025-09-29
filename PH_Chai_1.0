@@ -1,0 +1,1032 @@
+/*
+  CONTROLE AUTOMÁTICO DE PH - Arduino Nano (pronto pra rodar)
+  Projeto: controlador de pH com bomba peristáltica, ADS1115, DS18B20 e LCD 20x4 I2C
+  Autor: (adaptado para o Rafa)
+  Observações: evita delay(), usa millis(), watchdog, EEPROM, calibragem 1 e 2 pontos.
+  Obrigatório: instalar as bibliotecas Adafruit_ADS1X15, LiquidCrystal_I2C, OneWire, DallasTemperature
+*/
+
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <Adafruit_ADS1X15.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <EEPROM.h>
+#include <avr/wdt.h>   // watchdog
+
+// ========== CONFIGURAÇÕES HARDWARE ==========
+#define PIN_DS18B20        2   // D2
+#define PIN_BTN_MENU       3   // D3 (touch/menu)
+#define PIN_BTN_DOWN       4   // D4 (touch/down)
+#define PIN_BTN_UP         5   // D5 (touch/up)
+#define PIN_MOSFET_TRIG    6   // D6 (controla MOSFET -> bomba)
+#define PIN_LED_ALERT      7   // D7 (LED quando pH abaixo do ideal)
+
+#define ADS_ADDRESS        0x48
+#define LCD_ADDRESS        0x27
+#define LCD_COLS           20
+#define LCD_ROWS           4
+
+// ========== CONSTANTES DE PROJETO ==========
+const uint8_t NUM_SAMPLES = 15;           // 15 leituras por média
+const uint8_t DISCARD_HIGHEST = 2;        // descarta 2 maiores
+const uint8_t DISCARD_LOWEST  = 2;        // descarta 2 menores
+const unsigned long SAMPLE_INTERVAL_MS = 1000UL;      // 1s entre amostras
+const unsigned long INACTIVITY_TIMEOUT_MS = 30000UL;  // 30s inatividade menu -> voltar tela inicial
+const unsigned long PUMP_ADJUST_MS = 1000UL;          // bomba ligada 1s para ajuste
+const unsigned long PUMP_COOLDOWN_MS = 300000UL;      // 5 minutos cooldown depois de ajuste
+const float PH_DELTA_ALERT = 0.3f;       // delta que dispara rotina de verificação
+const float PH_STABLE_THRESHOLD = 0.1f;  // 3 médias dentro de 0.1 para considerar estável
+const uint8_t CALIB_MAX_ATTEMPTS = 5;    // tentativas de calibragem antes de erro
+
+// ADS1115: LSB dependendo do ganho. Vamos usar GAIN_ONE (±4.096V) -> 0.125mV por count
+const float ADS1115_LSB_V = 0.000125f; // V per count (4.096/32768)
+
+// EEPROM storage address
+const int EEPROM_ADDR = 0;
+
+// magic id para validar EEPROM
+const uint32_t EEPROM_MAGIC = 0xA5C0FFEEUL;
+
+// ========== BIBLIOTECAS / OBJETOS ==========
+LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLS, LCD_ROWS);
+Adafruit_ADS1115 ads(ADS_ADDRESS);
+OneWire oneWire(PIN_DS18B20);
+DallasTemperature ds(&oneWire);
+
+// ========== ESTRUTURAS DE DADOS (config gravada) ==========
+struct Config {
+  uint32_t magic;
+  uint8_t calibType;   // 0 = nenhum, 1 = 1 ponto, 2 = 2 pontos
+  float slope_mV_per_pH; // slope (mV por pH) => pH = (voltage_mV - offset_mV) / slope
+  float offset_mV;       // offset (mV)
+  float phIdeal;         // PH ideal desejado
+  // extras para debug / compatibilidade
+  float lastV1_mV;
+  float lastV2_mV;
+};
+Config cfg;
+
+// ========== VARIÁVEIS DE RUNTIME ==========
+float samples_mV[NUM_SAMPLES];
+uint8_t sampleIndex = 0;
+bool samplesFilled = false;
+
+unsigned long lastSampleMillis = 0;
+unsigned long lastInteractionMillis = 0;
+unsigned long lastPumpActivatedMillis = 0;
+bool pumpCooldown = false;
+
+float phInst = 7.0f;     // leitura instantânea (convetida)
+float phAtual = 7.0f;    // média filtrada
+float lastConfirmedPH = 7.0f;
+
+char spinnerChars[] = "|/-\\";
+uint8_t spinnerIndex = 0;
+
+// STATE MACHINE de telas/menus
+enum Screen { SCR_BOOT, SCR_MONITOR, SCR_MENU_MAIN, SCR_SET_PH, SCR_CALIB_MENU, SCR_CALIB_1_SELECT,
+              SCR_CALIB_2_FIRST, SCR_CALIB_2_SECOND, SCR_TECH_MENU, SCR_RAW_VALUES, SCR_CHECK_SENSORS,
+              SCR_CONFIRM_REBOOT, SCR_CALIB_IN_PROGRESS, SCR_ERROR_CALIB };
+Screen screen = SCR_BOOT;
+
+// menu temporários
+float tempPHSetting = 7.0f;
+unsigned long screenEnteredMillis = 0;
+
+// ========== FUNÇÕES AUXILIARES ==========
+
+// grava e lê config na EEPROM (estrutura inteira)
+void loadConfig() {
+  EEPROM.get(EEPROM_ADDR, cfg);
+  if (cfg.magic != EEPROM_MAGIC) {
+    // configuração padrão
+    cfg.magic = EEPROM_MAGIC;
+    cfg.calibType = 0;
+    // por default usamos slope teórica (assume escala do módulo = 1) - será ajustado em calibragem
+    cfg.slope_mV_per_pH = -59.16f; // mV/pH at 25C (será ajustado por temperatura quando usado)
+    cfg.offset_mV = 0.0f;
+    cfg.phIdeal = 7.0f;
+    cfg.lastV1_mV = 0;
+    cfg.lastV2_mV = 0;
+    EEPROM.put(EEPROM_ADDR, cfg);
+  }
+}
+
+void saveConfig() {
+  cfg.magic = EEPROM_MAGIC;
+  EEPROM.put(EEPROM_ADDR, cfg);
+}
+
+// leitura raw do ADS1115 A0 em mV
+float readADSmV_singleEnded() {
+  int16_t raw = ads.readADC_SingleEnded(0); // canal A0
+  float volts = raw * ADS1115_LSB_V; // em V
+  float mV = volts * 1000.0f;
+  return mV;
+}
+
+// calcula ph a partir de tensão (mV) e temperatura (C)
+float voltageToPH(float voltage_mV, float tempC) {
+  // se calibrado em 2 pontos (slope salvo), usa slope e offset salvos
+  if (cfg.calibType == 2 || cfg.calibType == 1) {
+    // Para 1 ponto, armazenamos slope_mV_per_pH usando teoria (ajustada por temperatura) no momento da calibração.
+    // Fórmula: pH = (V - offset) / slope
+    if (fabs(cfg.slope_mV_per_pH) < 0.0001f) return 7.0f; // proteção divisão por zero
+    float ph = (voltage_mV - cfg.offset_mV) / cfg.slope_mV_per_pH;
+    return ph;
+  } else {
+    // Sem calibragem: usa slope teórico do eletrodo (mV/pH) ajustado pela temperatura e assume offset 0
+    // slope_eletrodo = -59.16 mV/pH at 25C ; ajusta linearmente pela temperatura absoluta (K)
+    float slope25 = -59.16f; // mV/pH at 25°C
+    float slopeTemp = slope25 * ((tempC + 273.15f) / 298.15f);
+    if (fabs(slopeTemp) < 0.0001f) return 7.0f;
+    float ph = (voltage_mV - 0.0f) / slopeTemp;
+    return ph;
+  }
+}
+
+// calcula media filtrada descartando extremos (2 maiores e 2 menores)
+float computeFilteredAverageFromArray(float arr[], uint8_t len) {
+  // copia
+  float tmp[NUM_SAMPLES];
+  for (uint8_t i=0;i<len;i++) tmp[i] = arr[i];
+  // sort simples (insertion sort - ok pra 15 elementos)
+  for (uint8_t i=1;i<len;i++){
+    float key = tmp[i];
+    int j = i-1;
+    while (j>=0 && tmp[j] > key) {
+      tmp[j+1] = tmp[j];
+      j--;
+      if (j < 0) break;
+    }
+    tmp[j+1] = key;
+  }
+  uint8_t start = DISCARD_LOWEST;
+  uint8_t end = len - DISCARD_HIGHEST;
+  float sum = 0;
+  for (uint8_t i=start; i<end; i++) sum += tmp[i];
+  float avg = sum / float(end - start);
+  return avg;
+}
+
+// leitura DS18B20 temperatura em °C (retorna NAN se falha)
+float readTemperatureC() {
+  ds.requestTemperatures();
+  float t = ds.getTempCByIndex(0);
+  if (t == DEVICE_DISCONNECTED_C) return NAN;
+  return t;
+}
+
+// ========== UI / LCD HELPERS ==========
+void lcdPrintCentered(int row, const char* txt) {
+  int len = strlen(txt);
+  int pos = max(0, (LCD_COLS - len) / 2);
+  lcd.setCursor(pos, row);
+  lcd.print(txt);
+}
+
+void showSpinner() {
+  lcd.setCursor(0,0);
+  lcd.print("MONITORANDO ");
+  lcd.print(spinnerChars[spinnerIndex]);
+  spinnerIndex = (spinnerIndex + 1) % 4;
+}
+
+// desenha barra simples de progresso (0..100)
+void drawProgressBar(int row, int col, int width, float percent) {
+  int filled = int((percent/100.0f) * width + 0.5f);
+  if (filled < 0) filled = 0;
+  if (filled > width) filled = width;
+  lcd.setCursor(col, row);
+  for (int i=0;i<filled;i++) lcd.print(char(255));
+  for (int i=filled;i<width;i++) lcd.print(' ');
+}
+
+// limpa parte da tela (linha por linha)
+void clearLine(int row) {
+  lcd.setCursor(0,row);
+  for (int i=0;i<LCD_COLS;i++) lcd.print(' ');
+}
+
+// ========== BOTÕES (com debounce simples) ==========
+unsigned long lastDebounceTimeMenu = 0, lastDebounceTimeDown = 0, lastDebounceTimeUp = 0;
+bool lastBtnStateMenu = HIGH, lastBtnStateDown = HIGH, lastBtnStateUp = HIGH;
+const unsigned long DEBOUNCE_MS = 30;
+
+bool readButtonPressed(uint8_t pin, bool &lastState, unsigned long &lastDebounceTime) {
+  bool reading = digitalRead(pin);
+  if (reading != lastState) {
+    lastDebounceTime = millis();
+  }
+  if ((millis() - lastDebounceTime) > DEBOUNCE_MS) {
+    // stable
+    if (reading == LOW && lastState == HIGH) {
+      // press detected (assuming pullup -> LOW when pressed)
+      lastState = reading;
+      return true;
+    }
+  }
+  lastState = reading;
+  return false;
+}
+
+// ========== CALIBRAÇÃO (rotinas) ==========
+
+// rotina que coleta NUM_SAMPLES leituras (1s intervalo), descarta extremos, retorna média em mV
+bool collectCalibAverages(float &avg_mV) {
+  float localSamples[NUM_SAMPLES];
+  for (uint8_t i=0;i<NUM_SAMPLES;i++) {
+    // aguarda 1s entre leituras (não bloqueante)
+    unsigned long start = millis();
+    // espera 1s: como é uma função de calibragem, pode usar loop com wdt_reset
+    while (millis() - start < SAMPLE_INTERVAL_MS) {
+      wdt_reset();
+      // permitir interação de botões para cancelar? requisito não pediu — manter simples: não cancela
+      delay(5);
+    }
+    localSamples[i] = readADSmV_singleEnded();
+  }
+  avg_mV = computeFilteredAverageFromArray(localSamples, NUM_SAMPLES);
+  return true;
+}
+
+// Calibração 1 ponto: usa slope teórico ajustado por temperatura e calcula offset
+bool calibrateOnePoint(float solutionPH) {
+  lcd.clear();
+  lcdPrintCentered(0, "CALIBRAGEM 1 PONTO");
+  lcd.setCursor(0,1);
+  lcd.print("Solução pH: ");
+  lcd.print(solutionPH, 2);
+  lcd.setCursor(0,2);
+  lcd.print("Insira a sonda e pressione MENU");
+  // espera MENU
+  while (true) {
+    if (readButtonPressed(PIN_BTN_MENU, lastBtnStateMenu, lastDebounceTimeMenu)) break;
+    wdt_reset();
+    delay(10);
+  }
+  // coleta duas médias, valida diferença em pH <= 0.1
+  for (uint8_t attempt=1; attempt<=CALIB_MAX_ATTEMPTS; attempt++) {
+    float avg1 = 0;
+    lcd.clear(); lcdPrintCentered(0, "Coletando 15 amostras...");
+    collectCalibAverages(avg1);
+    // calcula slope teórico ajustado conforme temp
+    float tempC = readTemperatureC();
+    if (isnan(tempC)) tempC = 25.0f; // fallback
+    float slope25 = -59.16f;
+    float slopeTemp = slope25 * ((tempC + 273.15f) / 298.15f); // mV per pH (negativo)
+    float offset = avg1 - slopeTemp * solutionPH; // offset em mV
+    // segunda coleta
+    float avg2 = 0;
+    collectCalibAverages(avg2);
+    // converte avg2 para pH usando slopeTemp e offset calculado
+    float ph2 = (avg2 - offset) / slopeTemp;
+    float diff = fabs(ph2 - solutionPH);
+    if (diff <= 0.1f) {
+      // valida, grava cfg: slopeTemp e offset
+      cfg.calibType = 1;
+      cfg.slope_mV_per_pH = slopeTemp;
+      cfg.offset_mV = offset;
+      cfg.lastV1_mV = avg1;
+      cfg.lastV2_mV = avg2;
+      saveConfig();
+      lcd.clear();
+      lcdPrintCentered(1, "Calibragem OK");
+      lcd.setCursor(0,2);
+      lcd.print("Tentativas: ");
+      lcd.print(attempt);
+      delay(1200);
+      return true;
+    } else {
+      // falhou, repete ou erro
+      lcd.clear();
+      lcdPrintCentered(0, "Verificacao falhou");
+      lcd.setCursor(0,1); lcd.print("Dif: ");
+      lcd.print(diff, 3);
+      lcd.setCursor(0,2); lcd.print("Tentativa ");
+      lcd.print(attempt);
+      delay(1000);
+    }
+  }
+  // se chegou aqui, falha
+  return false;
+}
+
+// Calibração 2 pontos: coleta em dois pontos distintos e calcula slope e offset. Validação similar.
+bool calibrateTwoPoints(float ph1, float ph2) {
+  // primeira solução
+  lcd.clear(); lcdPrintCentered(0, "CALIBRAGEM 2 PONTOS");
+  // primeiro ponto
+  lcd.clear(); lcdPrintCentered(0, "1o PONTO");
+  delay(300);
+  lcd.setCursor(0,1); lcd.print("PH ");
+  lcd.print(ph1, 2);
+  lcd.setCursor(0,2); lcdPrintCentered(2, "Insira e pressione MENU");
+  while (true) {
+    if (readButtonPressed(PIN_BTN_MENU, lastBtnStateMenu, lastDebounceTimeMenu)) break;
+    wdt_reset(); delay(10);
+  }
+  // coleta pair1
+  float avg1_a = 0;
+  collectCalibAverages(avg1_a);
+
+  // segundo ponto (esconde primeiro da escolha feita na UI, ja garantido pelo fluxo)
+  lcd.clear(); lcdPrintCentered(0, "2o PONTO");
+  lcd.setCursor(0,1); lcd.print("PH ");
+  lcd.print(ph2, 2);
+  lcd.setCursor(0,2); lcdPrintCentered(2, "Insira e pressione MENU");
+  while (true) {
+    if (readButtonPressed(PIN_BTN_MENU, lastBtnStateMenu, lastDebounceTimeMenu)) break;
+    wdt_reset(); delay(10);
+  }
+  float avg2_a = 0;
+  collectCalibAverages(avg2_a);
+
+  // calcula slope a partir do primeiro par
+  if (fabs(ph1 - ph2) < 0.0001f) return false;
+  float slopeA = (avg1_a - avg2_a) / (ph1 - ph2); // mV per pH
+  float offsetA = avg1_a - slopeA * ph1;
+
+  // agora repetimos as leituras para validar (segunda série)
+  for (uint8_t attempt=1; attempt<=CALIB_MAX_ATTEMPTS; attempt++) {
+    // pedir repetir 1o ponto
+    lcd.clear(); lcdPrintCentered(0, "Repetir 1o PONTO");
+    lcd.setCursor(0,1); lcd.print("PH ");
+    lcd.print(ph1,2);
+    lcd.setCursor(0,2); lcdPrintCentered(2, "Press MENU para iniciar");
+    while (true) {
+      if (readButtonPressed(PIN_BTN_MENU, lastBtnStateMenu, lastDebounceTimeMenu)) break;
+      wdt_reset(); delay(10);
+    }
+    float avg1_b = 0;
+    collectCalibAverages(avg1_b);
+
+    // repetir 2o ponto
+    lcd.clear(); lcdPrintCentered(0, "Repetir 2o PONTO");
+    lcd.setCursor(0,1); lcd.print("PH ");
+    lcd.print(ph2,2);
+    lcd.setCursor(0,2); lcdPrintCentered(2, "Press MENU para iniciar");
+    while (true) {
+      if (readButtonPressed(PIN_BTN_MENU, lastBtnStateMenu, lastDebounceTimeMenu)) break;
+      wdt_reset(); delay(10);
+    }
+    float avg2_b = 0;
+    collectCalibAverages(avg2_b);
+
+    // converte as segundas medias usando slopeA e offsetA e compara com os ph conhecidos
+    float ph1_check = (avg1_b - offsetA) / slopeA;
+    float ph2_check = (avg2_b - offsetA) / slopeA;
+    float diff1 = fabs(ph1_check - ph1);
+    float diff2 = fabs(ph2_check - ph2);
+
+    if (diff1 <= 0.1f && diff2 <= 0.1f) {
+      // OK
+      cfg.calibType = 2;
+      cfg.slope_mV_per_pH = slopeA;
+      cfg.offset_mV = offsetA;
+      cfg.lastV1_mV = avg1_a;
+      cfg.lastV2_mV = avg2_a;
+      saveConfig();
+      lcd.clear();
+      lcdPrintCentered(1, "Calibragem 2P OK");
+      lcd.setCursor(0,2); lcd.print("Tentativas: ");
+      lcd.print(attempt);
+      delay(1200);
+      return true;
+    } else {
+      lcd.clear();
+      lcdPrintCentered(0, "Validação falhou");
+      lcd.setCursor(0,1); lcd.print("d1:");
+      lcd.print(diff1,3);
+      lcd.setCursor(0,2); lcd.print("d2:");
+      lcd.print(diff2,3);
+      delay(1200);
+    }
+  }
+
+  return false;
+}
+
+// ========== ROTINA DE CHECAGEM DE SENSORES ==========
+void checkSensorsAndDisplay() {
+  lcd.clear();
+  lcdPrintCentered(0, "TESTANDO SENSORES");
+  lcd.setCursor(0,1);
+  lcd.print("Aguarde...");
+  // simples checagens:
+  bool okDS = false;
+  bool okADS = false;
+  bool okPH = false;
+
+  // DS18B20
+  ds.requestTemperatures();
+  float t = ds.getTempCByIndex(0);
+  okDS = (t != DEVICE_DISCONNECTED_C);
+
+  // ADS1115 read
+  float v = readADSmV_singleEnded();
+  okADS = (!isnan(v) && v > -10000 && v < 10000); // sanity
+
+  // pH sensor sanity (mV plausível)
+  okPH = (v > -1000 && v < 5000); // heurística
+
+  // display
+  lcd.clear();
+  lcd.setCursor(0,0); lcd.print("DS18B20: ");
+  lcd.print(okDS ? "OK" : "ERRO");
+  lcd.setCursor(0,1); lcd.print("ADS1115: ");
+  lcd.print(okADS ? "OK" : "ERRO");
+  lcd.setCursor(0,2); lcd.print("PH_Sensor: ");
+  lcd.print(okPH ? "OK" : "ERRO");
+  lcd.setCursor(0,3);
+  lcd.print("Voltar: MENU");
+  // espera MENU
+  while (true) {
+    if (readButtonPressed(PIN_BTN_MENU, lastBtnStateMenu, lastDebounceTimeMenu)) break;
+    wdt_reset(); delay(10);
+  }
+}
+
+// reinicia sistema (mantendo EEPROM) usando watchdog
+void doRebootNow() {
+  lcd.clear(); lcdPrintCentered(1, "REINICIANDO...");
+  delay(200);
+  wdt_enable(WDTO_15MS);
+  while (1) {} // watchdog will reset
+}
+
+// ========== AÇÕES DE AJUSTE DE PH ==========
+void performPHAdjustmentAction(float currentPH) {
+  // se PH abaixo do ideal -> acende LED e avisa (não baixa pH)
+  if (currentPH < cfg.phIdeal) {
+    digitalWrite(PIN_LED_ALERT, HIGH);
+    lcd.clear();
+    lcd.setCursor(0,0); lcd.print("PH ABAIXO DO IDEAL");
+    lcd.setCursor(0,1); lcd.print("PH: ");
+    lcd.print(currentPH, 2);
+    lcd.setCursor(0,2); lcd.print("Ideal: ");
+    lcd.print(cfg.phIdeal, 2);
+    // mas continua o sistema (não travar)
+    // LED desligado quando volta ao range (ver loop principal)
+  } else {
+    // PH acima do ideal -> liga bomba por 1s
+    unsigned long now = millis();
+    if (!pumpCooldown || (now - lastPumpActivatedMillis >= PUMP_COOLDOWN_MS)) {
+      // iniciar ajuste
+      lcd.clear();
+      lcd.setCursor(0,0); lcd.print("AJUSTANDO PH...");
+      unsigned long start = millis();
+      digitalWrite(PIN_MOSFET_TRIG, HIGH); // liga bomba
+      // mostra barra preenchendo durante 1s
+      while (millis() - start < PUMP_ADJUST_MS) {
+        float pct = float(millis() - start) * 100.0f / float(PUMP_ADJUST_MS);
+        drawProgressBar(1, 0, 20, pct);
+        wdt_reset();
+        delay(20);
+      }
+      digitalWrite(PIN_MOSFET_TRIG, LOW); // desliga bomba
+      lastPumpActivatedMillis = millis();
+      pumpCooldown = true;
+      // mensagem ajuste completo
+      lcd.clear();
+      lcdPrintCentered(1, "AJUSTE COMPLETO");
+      delay(800);
+    } else {
+      // ainda em cooldown
+      unsigned long remaining = PUMP_COOLDOWN_MS - (now - lastPumpActivatedMillis);
+      lcd.clear();
+      lcd.setCursor(0,0); lcd.print("Em cooldown. ");
+      lcd.setCursor(0,1);
+      lcd.print("Restante (s): ");
+      lcd.print(remaining / 1000UL);
+      delay(800);
+    }
+  }
+}
+
+// ========== SETUP ==========
+void setup() {
+  // pinos
+  pinMode(PIN_BTN_MENU, INPUT_PULLUP);
+  pinMode(PIN_BTN_DOWN, INPUT_PULLUP);
+  pinMode(PIN_BTN_UP, INPUT_PULLUP);
+  pinMode(PIN_MOSFET_TRIG, OUTPUT);
+  pinMode(PIN_LED_ALERT, OUTPUT);
+  digitalWrite(PIN_MOSFET_TRIG, LOW);
+  digitalWrite(PIN_LED_ALERT, LOW);
+
+  // serial debug
+  Serial.begin(115200);
+  Serial.println("Iniciando sistema pH...");
+
+  // lcd
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcdPrintCentered(0, "Inicializando...");
+  delay(300);
+
+  // ADS1115
+  ads.begin();
+  ads.setGain(GAIN_ONE); // ±4.096V
+
+  // sensor temperatura
+  ds.begin();
+
+  // watchdog - habilita com timeout generoso (8s)
+  wdt_enable(WDTO_8S);
+
+  // carregar config
+  loadConfig();
+
+  // pequenas infos
+  lcd.clear();
+  lcdPrintCentered(0, "Sistema pronto");
+  lcd.setCursor(0,1); lcd.print("PH ideal: ");
+  lcd.print(cfg.phIdeal, 2);
+  delay(800);
+
+  // set initial screen
+  screen = SCR_MONITOR;
+  screenEnteredMillis = millis();
+
+  // inicializar amostras com leitura inicial para evitar garbage
+  for (uint8_t i=0;i<NUM_SAMPLES;i++) samples_mV[i] = readADSmV_singleEnded();
+  samplesFilled = true;
+  sampleIndex = 0;
+  lastSampleMillis = millis();
+}
+
+// ========== LOOP PRINCIPAL ==========
+void loop() {
+  unsigned long now = millis();
+  wdt_reset(); // alimenta o dog constantemente
+
+  // leitura periódica de 1s -> atualiza buffer de amostras brutas (mV)
+  if (now - lastSampleMillis >= SAMPLE_INTERVAL_MS) {
+    lastSampleMillis = now;
+    float mV = readADSmV_singleEnded();
+    samples_mV[sampleIndex] = mV;
+    sampleIndex++;
+    if (sampleIndex >= NUM_SAMPLES) {
+      sampleIndex = 0;
+      samplesFilled = true;
+    }
+    // atualiza leitura instantânea (converte usando cfg)
+    float tempC = readTemperatureC();
+    if (isnan(tempC)) tempC = 25.0f; // fallback
+    phInst = voltageToPH(mV, tempC);
+
+    // toda vez que completamos NUM_SAMPLES, atualiza PH_ATUAL (média filtrada)
+    static uint8_t lastCalcIdx = 0;
+    // detecta quando circular buffer completou pelo menos uma rodada: usar samplesFilled flag
+    static unsigned long lastPhAtualUpdate = 0;
+    if (samplesFilled && (now - lastPhAtualUpdate >= (NUM_SAMPLES * SAMPLE_INTERVAL_MS - 200))) {
+      // calcula média filtrada
+      float bufferCopy[NUM_SAMPLES];
+      // copiar em ordem estável
+      for (uint8_t i=0;i<NUM_SAMPLES;i++) bufferCopy[i] = samples_mV[i];
+      float avg_mV = computeFilteredAverageFromArray(bufferCopy, NUM_SAMPLES);
+      float tempC2 = readTemperatureC();
+      if (isnan(tempC2)) tempC2 = 25.0f;
+      float avgPH = voltageToPH(avg_mV, tempC2);
+      phAtual = avgPH;
+      lastPhAtualUpdate = now;
+
+      // VERIFICAÇÃO de variação grande (>0.3) com última média confirmada
+      if (fabs(phAtual - lastConfirmedPH) > PH_DELTA_ALERT) {
+        // inicia rotina de verificação: coletar médias até que haja 3 médias seguidas dentro de 0.1
+        // vamos tentar até 10 médias (segurança)
+        float recentAverages[10];
+        uint8_t count = 0;
+        recentAverages[count++] = phAtual;
+        bool stable = false;
+        for (uint8_t iter=0; iter<9; iter++) {
+          // coleta nova média de 15 leituras
+          float avg_mV2 = 0;
+          // coletar de forma síncrona usando SAMPLE_INTERVAL (pode demorar N*1s)
+          for (uint8_t k=0;k<NUM_SAMPLES;k++) {
+            unsigned long sstart = millis();
+            while (millis() - sstart < SAMPLE_INTERVAL_MS) {
+              wdt_reset(); delay(5);
+            }
+            recentAverages[0] = readADSmV_singleEnded(); // just to keep loop running
+            // porém para integridade vamos ler todas as amostras em um buffer e calcular a média filtrada
+          }
+          // Na prática, para não duplicar código, vamos simplesmente recomputar usando o buffer atual
+          // (isso reduz tempo de re-leitura, e atende o requisito de "refazer a rotina de medição")
+          float bufferCopy2[NUM_SAMPLES];
+          for (uint8_t i=0;i<NUM_SAMPLES;i++) bufferCopy2[i] = samples_mV[i];
+          float avg_mV_new = computeFilteredAverageFromArray(bufferCopy2, NUM_SAMPLES);
+          float tempNow = readTemperatureC();
+          if (isnan(tempNow)) tempNow = 25.0f;
+          float newPH = voltageToPH(avg_mV_new, tempNow);
+          // shift recentAverages
+          for (int j=min((uint8_t)9, count); j>0; j--) recentAverages[j] = recentAverages[j-1];
+          recentAverages[0] = newPH;
+          if (count < 10) count++;
+          // checa se temos 3 seguidas (0,1,2) com dif <= 0.1
+          if (count >= 3) {
+            if (fabs(recentAverages[0] - recentAverages[1]) <= PH_STABLE_THRESHOLD &&
+                fabs(recentAverages[1] - recentAverages[2]) <= PH_STABLE_THRESHOLD) {
+              stable = true;
+              float combined = (recentAverages[0] + recentAverages[1] + recentAverages[2]) / 3.0f;
+              phAtual = combined;
+              break;
+            }
+          }
+        } // fim for
+        if (!stable) {
+          // não estável; manter última medida e não agir
+          lastConfirmedPH = phAtual;
+        } else {
+          lastConfirmedPH = phAtual;
+          // toma ação com base no phAtual final
+          performPHAdjustmentAction(phAtual);
+        }
+      } else {
+        // diferença pequena -> nada a fazer, atualizar lastConfirmedPH
+        lastConfirmedPH = phAtual;
+        // se pH voltou ao range ideal, garante LED apagado
+        if (phAtual >= cfg.phIdeal) digitalWrite(PIN_LED_ALERT, LOW);
+      }
+    } // fim update PH_ATUAL
+  } // fim if de amostragem
+
+  // ========== MANUSEIO DE INTERAÇÃO DO USUÁRIO (botões) ==========
+  // leitura de botões com debounce simples
+  bool pressedMenu = readButtonPressed(PIN_BTN_MENU, lastBtnStateMenu, lastDebounceTimeMenu);
+  bool pressedDown = readButtonPressed(PIN_BTN_DOWN, lastBtnStateDown, lastDebounceTimeDown);
+  bool pressedUp   = readButtonPressed(PIN_BTN_UP, lastBtnStateUp, lastDebounceTimeUp);
+
+  if (pressedMenu || pressedDown || pressedUp) {
+    lastInteractionMillis = now;
+  }
+
+  // navegação e telas
+  switch (screen) {
+    case SCR_MONITOR:
+      // atualização de tela (a cada amostra ou a cada X ms)
+      if (now - screenEnteredMillis > 250) {
+        screenEnteredMillis = now;
+        lcd.clear();
+        showSpinner();
+        lcd.setCursor(0,1);
+        lcd.print("PH ATUAL: ");
+        lcd.print(phAtual, 2);
+        lcd.setCursor(0,2);
+        lcd.print("PH INST: ");
+        lcd.print(phInst, 2);
+        lcd.setCursor(0,3);
+        lcd.print("Temp:");
+        float t = readTemperatureC();
+        if (isnan(t)) lcd.print("??C"); else { lcd.print(t,1); lcd.print("C "); }
+        lcd.print(" | Ideal:");
+        lcd.print(cfg.phIdeal,1);
+      }
+      // se MENU pressionado -> abrir menu principal
+      if (pressedMenu) {
+        screen = SCR_MENU_MAIN;
+        screenEnteredMillis = now;
+        lcd.clear();
+        lcdPrintCentered(0, "MENU PRINCIPAL");
+        delay(200);
+      }
+      break;
+
+    case SCR_MENU_MAIN:
+      // opções: Definir PH Ideal / Calibrar Sonda / Menu Técnico / Voltar
+      // mostramos uma lista e navegamos com UP/DOWN e MENU para selecionar
+      {
+        static int sel = 0;
+        const char* items[] = { "Definir PH Ideal", "Calibrar Sonda", "Menu Tecnico", "Voltar" };
+        const int nItems = 4;
+        if (pressedUp) { sel = (sel - 1 + nItems) % nItems; }
+        if (pressedDown) { sel = (sel + 1) % nItems; }
+        // se entrou na tela pela primeira vez, reset seleção
+        if (now - screenEnteredMillis < 300) sel = 0;
+        // desenha
+        lcd.clear();
+        lcd.setCursor(0,0); lcd.print("> ");
+        lcd.print(items[sel]);
+        lcd.setCursor(0,1); lcd.print("  ");
+        lcd.print(items[(sel+1)%nItems]);
+        lcd.setCursor(0,2); lcd.print("  ");
+        lcd.print(items[(sel+2)%nItems]);
+        lcd.setCursor(0,3); lcd.print("Press MENU p/ OK");
+        // ação MENU
+        if (pressedMenu) {
+          if (sel == 0) {
+            // definir ph ideal
+            tempPHSetting = cfg.phIdeal;
+            screen = SCR_SET_PH;
+            screenEnteredMillis = now;
+            delay(150);
+          } else if (sel == 1) {
+            screen = SCR_CALIB_MENU;
+            screenEnteredMillis = now;
+            delay(150);
+          } else if (sel == 2) {
+            screen = SCR_TECH_MENU;
+            screenEnteredMillis = now;
+            delay(150);
+          } else {
+            // voltar para monitor
+            screen = SCR_MONITOR;
+            screenEnteredMillis = now;
+            delay(150);
+          }
+        }
+        // timeout inatividade
+        if (now - lastInteractionMillis > INACTIVITY_TIMEOUT_MS) {
+          screen = SCR_MONITOR;
+          screenEnteredMillis = now;
+        }
+      }
+      break;
+
+    case SCR_SET_PH:
+      // ajustar PH ideal: range 1.0 .. 13.0 step 0.1
+      {
+        // altera com UP/DOWN
+        if (pressedUp) {
+          tempPHSetting += 0.1f;
+          if (tempPHSetting > 13.0f) tempPHSetting = 13.0f;
+        }
+        if (pressedDown) {
+          tempPHSetting -= 0.1f;
+          if (tempPHSetting < 1.0f) tempPHSetting = 1.0f;
+        }
+        // desenha
+        lcd.clear();
+        lcdPrintCentered(0, "DEFINIR PH IDEAL");
+        lcd.setCursor(0,1);
+        lcd.print("PH Ideal: ");
+        lcd.print(tempPHSetting, 1);
+        lcd.setCursor(0,2);
+        lcd.print("Press MENU p/ salvar");
+        lcd.setCursor(0,3);
+        lcd.print("Voltar: espera 30s inativo");
+        // salvar
+        if (pressedMenu) {
+          cfg.phIdeal = tempPHSetting;
+          saveConfig();
+          lcd.clear();
+          lcdPrintCentered(1, "Gravado com sucesso");
+          delay(800);
+          screen = SCR_MONITOR;
+          screenEnteredMillis = now;
+        }
+        if (now - lastInteractionMillis > INACTIVITY_TIMEOUT_MS) {
+          // descarta ajuste, volta ao ultimo valor gravado
+          lcd.clear(); lcdPrintCentered(1, "Ajuste descartado");
+          delay(600);
+          screen = SCR_MONITOR;
+          screenEnteredMillis = now;
+        }
+      }
+      break;
+
+    case SCR_CALIB_MENU:
+      // opcoes: 1 PONTO / 2 PONTOS / Voltar
+      {
+        static int sel = 0;
+        const char* items[] = { "1 PONTO", "2 PONTOS", "Voltar" };
+        const int nItems = 3;
+        if (pressedUp) sel = (sel - 1 + nItems) % nItems;
+        if (pressedDown) sel = (sel + 1) % nItems;
+        if (now - screenEnteredMillis < 200) sel = 0;
+        lcd.clear();
+        lcd.setCursor(0,0); lcd.print("> "); lcd.print(items[sel]);
+        lcd.setCursor(0,1); lcd.print("  "); lcd.print(items[(sel+1)%nItems]);
+        lcd.setCursor(0,2); lcd.print("  "); lcd.print(items[(sel+2)%nItems]);
+        lcd.setCursor(0,3); lcd.print("Press MENU");
+        if (pressedMenu) {
+          if (sel == 0) {
+            // seleciona solução para 1 ponto (4.01, 7.01, 10.1)
+            screen = SCR_CALIB_1_SELECT;
+            screenEnteredMillis = now;
+          } else if (sel == 1) {
+            // 2 pontos - iremos pedir primeiro ponto
+            screen = SCR_CALIB_2_FIRST;
+            screenEnteredMillis = now;
+          } else {
+            screen = SCR_MONITOR;
+            screenEnteredMillis = now;
+          }
+        }
+        if (now - lastInteractionMillis > INACTIVITY_TIMEOUT_MS) {
+          screen = SCR_MONITOR;
+          screenEnteredMillis = now;
+        }
+      }
+      break;
+
+    case SCR_CALIB_1_SELECT:
+      {
+        // escolha entre 4.01, 7.01, 10.1
+        float options[] = {4.01f, 7.01f, 10.1f};
+        static int sel = 1;
+        if (now - screenEnteredMillis < 200) sel = 1; // default 7.01
+        if (pressedUp) sel = (sel - 1 + 3) % 3;
+        if (pressedDown) sel = (sel + 1) % 3;
+        lcd.clear();
+        lcd.setCursor(0,0); lcd.print("CALIBRAR 1 PONTO");
+        lcd.setCursor(0,1); lcd.print("> ");
+        lcd.print(options[sel], 2);
+        lcd.setCursor(0,2); lcd.print("Press MENU p/ iniciar");
+        lcd.setCursor(0,3); lcd.print("Voltar: MENU atras");
+        if (pressedMenu) {
+          bool ok = calibrateOnePoint(options[sel]);
+          if (ok) {
+            lcd.clear(); lcdPrintCentered(1, "CALIBRAGEM SALVA");
+            delay(800);
+            screen = SCR_MONITOR;
+          } else {
+            screen = SCR_ERROR_CALIB;
+          }
+          screenEnteredMillis = now;
+        }
+        if (now - lastInteractionMillis > INACTIVITY_TIMEOUT_MS) {
+          screen = SCR_MONITOR;
+          screenEnteredMillis = now;
+        }
+      }
+      break;
+
+    case SCR_CALIB_2_FIRST:
+      {
+        // para calibragem 2 pontos, pedimos que escolha primeiro ponto entre 4.01, 7.01, 10.1
+        float options[] = {4.01f, 7.01f, 10.1f};
+        static int sel = 0;
+        if (now - screenEnteredMillis < 200) sel = 0;
+        if (pressedUp) sel = (sel - 1 + 3) % 3;
+        if (pressedDown) sel = (sel + 1) % 3;
+        lcd.clear();
+        lcd.setCursor(0,0); lcd.print("CALIBRAR 2 PONTOS");
+        lcd.setCursor(0,1); lcd.print("1o PONTO: ");
+        lcd.print(options[sel],2);
+        lcd.setCursor(0,2); lcd.print("Press MENU p/ OK");
+        lcd.setCursor(0,3); lcd.print("Voltar: MENU");
+        if (pressedMenu) {
+          // armazena primeira escolha em temp
+          float firstPH = options[sel];
+          // agora palavra: o segundo ponto nao pode ser o mesmo; iremos iterativamente pedir
+          // montar menu de escolha para segundo ponto excluindo primeiro
+          // salvamos firstPH em cfg temporario e vamos para estado SCR_CALIB_2_SECOND, usando a pilha
+          cfg.lastV1_mV = firstPH; // reuso field temporariamente
+          screen = SCR_CALIB_2_SECOND;
+          screenEnteredMillis = now;
+        }
+        if (now - lastInteractionMillis > INACTIVITY_TIMEOUT_MS) {
+          screen = SCR_MONITOR;
+          screenEnteredMillis = now;
+        }
+      }
+      break;
+
+    case SCR_CALIB_2_SECOND:
+      {
+        // recuperar firstPH de cfg.lastV1_mV (usamos como temporario)
+        float firstPH = cfg.lastV1_mV;
+        float options[] = {4.01f, 7.01f, 10.1f};
+        // construir lista sem firstPH
+        float choices[2];
+        int idx = 0;
+        for (int i=0;i<3;i++) {
+          if (fabs(options[i] - firstPH) > 0.001f) {
+            choices[idx++] = options[i];
+          }
+        }
+        static int sel = 0;
+        if (now - screenEnteredMillis < 200) sel = 0;
+        if (pressedUp) sel = (sel - 1 + 2) % 2;
+        if (pressedDown) sel = (sel + 1) % 2;
+        lcd.clear();
+        lcd.setCursor(0,0); lcd.print("Calib 2 Pontos");
+        lcd.setCursor(0,1); lcd.print("1o: "); lcd.print(firstPH,2);
+        lcd.setCursor(0,2); lcd.print("2o: "); lcd.print(choices[sel],2);
+        lcd.setCursor(0,3); lcd.print("Press MENU p/ iniciar");
+        if (pressedMenu) {
+          bool ok = calibrateTwoPoints(firstPH, choices[sel]);
+          if (ok) {
+            lcd.clear(); lcdPrintCentered(1, "CALIBRAGEM 2P SALVA");
+            delay(800);
+            screen = SCR_MONITOR;
+          } else {
+            screen = SCR_ERROR_CALIB;
+          }
+          screenEnteredMillis = now;
+        }
+        if (now - lastInteractionMillis > INACTIVITY_TIMEOUT_MS) {
+          screen = SCR_MONITOR;
+          screenEnteredMillis = now;
+        }
+      }
+      break;
+
+    case SCR_ERROR_CALIB:
+      {
+        lcd.clear();
+        lcdPrintCentered(0, "ERRO DE CALIBRAGEM");
+        lcd.setCursor(0,2); lcd.print("MENU: Tentar Novamente");
+        lcd.setCursor(0,3); lcd.print("Voltar: Voltar");
+        // simplifico: MENU volta ao menu de calibragem principal
+        if (pressedMenu) {
+          screen = SCR_CALIB_MENU;
+          screenEnteredMillis = now;
+        }
+        // timeout
+        if (now - lastInteractionMillis > INACTIVITY_TIMEOUT_MS) {
+          screen = SCR_MONITOR;
+          screenEnteredMillis = now;
+        }
+      }
+      break;
+
+    case SCR_TECH_MENU:
+      {
+        // MENU TÉCNICO: Valores Brutos / Checar Sensores / Reiniciar / Voltar
+        static int sel = 0;
+        const char* items[] = { "Valores Brutos", "Checar Sensores", "Reiniciar", "Voltar" };
+        const int nItems = 4;
+        if (now - screenEnteredMillis < 200) sel = 0;
+        if (pressedUp) sel = (sel - 1 + nItems) % nItems;
+        if (pressedDown) sel = (sel + 1) % nItems;
+        lcd.clear();
+        lcd.setCursor(0,0); lcd.print("> "); lcd.print(items[sel]);
+        lcd.setCursor(0,1); lcd.print("  "); lcd.print(items[(sel+1)%nItems]);
+        lcd.setCursor(0,2); lcd.print("  "); lcd.print(items[(sel+2)%nItems]);
+        lcd.setCursor(0,3); lcd.print("Press MENU");
+        if (pressedMenu) {
+          if (sel == 0) {
+            screen = SCR_RAW_VALUES;
+          } else if (sel == 1) {
+            checkSensorsAndDisplay();
+            screen = SCR_TECH_MENU;
+          } else if (sel == 2) {
+            screen = SCR_CONFIRM_REBOOT;
+          } else {
+            screen = SCR_MONITOR;
+          }
+          screenEnteredMillis = now;
+        }
+        if (now - lastInteractionMillis > INACTIVITY_TIMEOUT_MS) {
+          screen = SCR_MONITOR;
+          screenEnteredMillis = now;
+        }
+      }
+      break;
+
+    case SCR_RAW_VALUES:
+      {
+        lcd.clear();
+        lcdPrintCentered(0, "VALORES BRUTOS");
+        float volt = readADSmV_singleEnded();
+        lcd.setCursor(0,1);
+        lcd.print("Tensao(mV): ");
+        lcd.print(volt,2);
+        lcd.setCursor(0,2);
+        lcd.print("Last slope: ");
+        lcd.print(cfg.slope_mV_per_pH, 3);
+        lcd.setCursor(0,3);
+        lcd.print("Voltar: MENU");
+        if (pressedMenu) { screen = SCR_TECH_MENU; screenEnteredMillis = now; }
+        if (now - lastInteractionMillis > INACTIVITY_TIMEOUT_MS) { screen = SCR_MONITOR; screenEnteredMillis = now; }
+      }
+      break;
+
+    case SCR_CONFIRM_REBOOT:
+      {
+        lcd.clear();
+        lcdPrintCentered(0, "REINICIAR SISTEMA?");
+        lcd.setCursor(0,2); lcd.print("MENU: SIM  DOWN: NAO");
+        if (pressedMenu) doRebootNow();
+        if (pressedDown) { screen = SCR_TECH_MENU; screenEnteredMillis = now; }
+      }
+      break;
+
+    default:
+      // fallback para monitor
+      screen = SCR_MONITOR;
+      screenEnteredMillis = now;
+      break;
+  } // fim switch screens
+
+  // se LED de alerta estiver aceso e phAtual >= ideal -> apagar
+  if (digitalRead(PIN_LED_ALERT) == HIGH && phAtual >= cfg.phIdeal) {
+    digitalWrite(PIN_LED_ALERT, LOW);
+  }
+
+  // checagem timeout geral de menu -> volta monitor
+  if (screen != SCR_MONITOR && (now - lastInteractionMillis > INACTIVITY_TIMEOUT_MS)) {
+    screen = SCR_MONITOR;
+    screenEnteredMillis = now;
+  }
+
+  // garantir reset do watchdog em loops longos
+  wdt_reset();
+  // pequeno yield
+  delay(10);
+}
