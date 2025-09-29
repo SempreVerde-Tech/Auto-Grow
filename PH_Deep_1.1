@@ -35,9 +35,10 @@ const unsigned long PUMP_RUN_TIME = 1000;
 const unsigned long PUMP_COOLDOWN = 300000;
 const unsigned long READING_INTERVAL = 1000;
 const unsigned long AVERAGING_INTERVAL = 15000;
+const unsigned long DISPLAY_UPDATE_INTERVAL = 500;
 
 // Configurações ADS1115
-const float ADS1115_CONVERSION_FACTOR = 0.0001875; // 6.144V / 32768
+const float ADS1115_CONVERSION_FACTOR = 0.0001875;
 
 // Soluções de calibração
 const float CALIB_SOLUTIONS[3] = {4.01, 7.01, 10.1};
@@ -90,6 +91,7 @@ unsigned long lastAveragingTime = 0;
 unsigned long lastPumpActivation = 0;
 unsigned long stateEntryTime = 0;
 unsigned long lastBootUpdate = 0;
+unsigned long lastDisplayUpdate = 0;
 
 // Buffers de leitura
 const uint8_t READINGS_BUFFER_SIZE = 15;
@@ -101,6 +103,7 @@ bool bufferInitialized = false;
 uint8_t menuPosition = 0;
 uint8_t subMenuPosition = 0;
 bool needsRedraw = true;
+bool displayInitialized = false;
 
 // Status do sistema
 bool isPumpRunning = false;
@@ -135,10 +138,13 @@ void setup() {
   Wire.begin();
   lcd.begin(20, 4);
   lcd.backlight();
+  lcd.clear();
+  displayInitialized = true;
   
   // Inicialização de sensores
   tempSensor.begin();
   if (!ads1115.begin(0x48)) {
+    lcd.setCursor(0, 0);
     lcd.print("Erro ADS1115!");
     while(1) { 
       wdt_reset();
@@ -147,7 +153,7 @@ void setup() {
   }
   ads1115.setGain(GAIN_TWOTHIRDS);
   
-  // Inicializar buffer de leituras com valores realistas
+  // Inicializar buffer de leituras
   for (int i = 0; i < READINGS_BUFFER_SIZE; i++) {
     phReadings[i] = 7.0;
   }
@@ -164,8 +170,8 @@ void setup() {
   EEPROM.get(EEPROM_CALIB_SLOPE, calibSlope);
   
   if (isnan(calibOffset) || isnan(calibSlope) || calibSlope == 0.0) {
-    calibOffset = 2.5; // Valor realista para pH 7
-    calibSlope = 0.18; // Slope realista
+    calibOffset = 2.5;
+    calibSlope = 0.18;
     EEPROM.put(EEPROM_CALIB_OFFSET, calibOffset);
     EEPROM.put(EEPROM_CALIB_SLOPE, calibSlope);
   }
@@ -182,7 +188,12 @@ void loop() {
   handleButtons();
   handleStateMachine();
   updateSensors();
-  updateDisplay();
+  
+  // Atualizar display com intervalo controlado
+  if (millis() - lastDisplayUpdate >= DISPLAY_UPDATE_INTERVAL) {
+    lastDisplayUpdate = millis();
+    updateDisplay();
+  }
   
   // Controle automático da bomba
   if (isPumpRunning && (millis() - lastPumpActivation > PUMP_RUN_TIME)) {
@@ -264,8 +275,9 @@ void updateSensors() {
       currentTemp = 25.0;
     }
     
-    // Ler PH instantâneo
-    float voltage = readPhVoltage();
+    // Ler PH instantâneo - SIMULAÇÃO PARA TESTE
+    //float voltage = readPhVoltage();
+    float voltage = 2.5 + (sin(millis() / 10000.0) * 0.5); // Simulação
     instantPh = calculatePh(voltage, currentTemp);
     
     // Atualizar buffer para média
@@ -284,8 +296,7 @@ void updateSensors() {
 
 float readPhVoltage() {
   int16_t adcValue = ads1115.readADC_SingleEnded(0);
-  // Simular leitura real para teste - REMOVER EM PRODUÇÃO
-  return ads1115.readADC_SingleEnded(0) * ADS1115_CONVERSION_FACTOR;
+  return adcValue * ADS1115_CONVERSION_FACTOR;
 }
 
 void calculatePhAverage() {
@@ -294,7 +305,7 @@ void calculatePhAverage() {
   float sortedReadings[READINGS_BUFFER_SIZE];
   memcpy(sortedReadings, phReadings, sizeof(phReadings));
   
-  // Ordenar leituras (bubble sort simples)
+  // Ordenar leituras
   for (int i = 0; i < READINGS_BUFFER_SIZE - 1; i++) {
     for (int j = i + 1; j < READINGS_BUFFER_SIZE; j++) {
       if (sortedReadings[i] > sortedReadings[j]) {
@@ -305,7 +316,7 @@ void calculatePhAverage() {
     }
   }
   
-  // Calcular média sem outliers (descarta 2 menores e 2 maiores)
+  // Calcular média sem outliers
   float sum = 0;
   uint8_t validReadings = 0;
   for (int i = 2; i < READINGS_BUFFER_SIZE - 2; i++) {
@@ -340,11 +351,7 @@ void checkPhAdjustment() {
 }
 
 float calculatePh(float voltage, float temperature) {
-  // Fórmula realista para sensor de pH
-  // pH = (voltage - offset) / slope com compensação de temperatura
   float phValue = (voltage - calibOffset) / calibSlope;
-  
-  // Compensação de temperatura (coeficiente típico de 0.03 pH/°C)
   float tempCompensation = 1.0 + 0.03 * (temperature - 25.0);
   return phValue / tempCompensation;
 }
@@ -354,19 +361,25 @@ void handleButtons() {
   static unsigned long lastDebounceTime = 0;
   const unsigned long debounceDelay = 50;
   
+  // Ler estado atual dos botões
   bool menuPressed = (digitalRead(PIN_BUTTON_MENU) == LOW);
   bool downPressed = (digitalRead(PIN_BUTTON_DOWN) == LOW);
   bool upPressed = (digitalRead(PIN_BUTTON_UP) == LOW);
   
-  // Detectar qualquer botão pressionado
+  // Se algum botão foi pressionado
   if (menuPressed || downPressed || upPressed) {
     if (millis() - lastDebounceTime > debounceDelay) {
       lastDebounceTime = millis();
       lastButtonPress = millis();
       
-      if (menuPressed) processButtonPress(0);
-      else if (downPressed) processButtonPress(1);
-      else if (upPressed) processButtonPress(2);
+      // Processar botão pressionado
+      if (menuPressed) {
+        processButtonPress(0);
+      } else if (downPressed) {
+        processButtonPress(1);
+      } else if (upPressed) {
+        processButtonPress(2);
+      }
       
       needsRedraw = true;
     }
@@ -395,7 +408,12 @@ void processButtonPress(int button) {
       break;
       
     case CALIBRATE_1POINT_MENU:
-      handleCalibrate1PointMenuButtons(button);
+      if (button == 0) {
+        currentState = CALIBRATE_1POINT_SOLUTION;
+        subMenuPosition = 0;
+      } else {
+        currentState = CALIBRATE_MENU;
+      }
       break;
       
     case CALIBRATE_1POINT_SOLUTION:
@@ -403,7 +421,12 @@ void processButtonPress(int button) {
       break;
       
     case CALIBRATE_2POINT_MENU:
-      handleCalibrate2PointMenuButtons(button);
+      if (button == 0) {
+        currentState = CALIBRATE_2POINT_SOLUTION1;
+        subMenuPosition = 0;
+      } else {
+        currentState = CALIBRATE_MENU;
+      }
       break;
       
     case CALIBRATE_2POINT_SOLUTION1:
@@ -443,7 +466,7 @@ void handleMainMenuButtons(int button) {
       else if (menuPosition == 1) currentState = CALIBRATE_MENU;
       else if (menuPosition == 2) currentState = TECH_MENU;
       else if (menuPosition == 3) currentState = MONITORING;
-      menuPosition = 0; // Resetar posição do menu
+      menuPosition = 0;
       break;
     case 1: // DOWN
       menuPosition = (menuPosition + 1) % 4;
@@ -475,11 +498,9 @@ void handleCalibrateMenuButtons(int button) {
     case 0: // MENU
       if (menuPosition == 0) {
         currentState = CALIBRATE_1POINT_MENU;
-        subMenuPosition = 0;
       }
       else if (menuPosition == 1) {
         currentState = CALIBRATE_2POINT_MENU;
-        subMenuPosition = 0;
       }
       else if (menuPosition == 2) currentState = MAIN_MENU;
       break;
@@ -488,19 +509,6 @@ void handleCalibrateMenuButtons(int button) {
       break;
     case 2: // UP
       menuPosition = (menuPosition == 0) ? 2 : menuPosition - 1;
-      break;
-  }
-}
-
-void handleCalibrate1PointMenuButtons(int button) {
-  switch (button) {
-    case 0: // MENU
-      currentState = CALIBRATE_1POINT_SOLUTION;
-      subMenuPosition = 0;
-      break;
-    case 1: // DOWN - Voltar
-    case 2: // UP - Voltar
-      currentState = CALIBRATE_MENU;
       break;
   }
 }
@@ -526,26 +534,13 @@ void handleCalibrate1PointSolutionButtons(int button) {
   }
 }
 
-void handleCalibrate2PointMenuButtons(int button) {
-  switch (button) {
-    case 0: // MENU
-      currentState = CALIBRATE_2POINT_SOLUTION1;
-      subMenuPosition = 0;
-      break;
-    case 1: // DOWN - Voltar
-    case 2: // UP - Voltar
-      currentState = CALIBRATE_MENU;
-      break;
-  }
-}
-
 void handleCalibrate2PointSolution1Buttons(int button) {
   switch (button) {
     case 0: // MENU
       tempCalibPh1 = CALIB_SOLUTIONS[subMenuPosition];
       currentState = CALIBRATE_2POINT_SOLUTION2;
       subMenuPosition = 0;
-      // Garantir que a segunda solução seja diferente da primeira
+      // Garantir solução diferente
       if (subMenuPosition == menuPosition) {
         subMenuPosition = (subMenuPosition + 1) % 3;
       }
@@ -569,14 +564,12 @@ void handleCalibrate2PointSolution2Buttons(int button) {
       break;
     case 1: // DOWN
       subMenuPosition = (subMenuPosition + 1) % 3;
-      // Pular a solução já selecionada como primeira
       if (CALIB_SOLUTIONS[subMenuPosition] == tempCalibPh1) {
         subMenuPosition = (subMenuPosition + 1) % 3;
       }
       break;
     case 2: // UP
       subMenuPosition = (subMenuPosition == 0) ? 2 : subMenuPosition - 1;
-      // Pular a solução já selecionada como primeira
       if (CALIB_SOLUTIONS[subMenuPosition] == tempCalibPh1) {
         subMenuPosition = (subMenuPosition == 0) ? 2 : subMenuPosition - 1;
       }
@@ -639,7 +632,6 @@ void handleCalibration1PointMeasuring() {
   float newAverage = takeCalibrationReadings();
   
   if (abs(newAverage - tempCalibVoltage1) <= CALIBRATION_TOLERANCE) {
-    // Calibração bem sucedida
     calibSlope = (newAverage - calibOffset) / tempCalibSolution;
     EEPROM.put(EEPROM_CALIB_SLOPE, calibSlope);
     currentState = MONITORING;
@@ -647,7 +639,6 @@ void handleCalibration1PointMeasuring() {
   } else {
     calibAttempts++;
     if (calibAttempts >= 5) {
-      // Falha na calibração
       currentState = MONITORING;
       needsRedraw = true;
     } else {
@@ -672,7 +663,6 @@ void handleCalibration2PointMeasuring2() {
   
   tempCalibVoltage2 = takeCalibrationReadings();
   
-  // Calcular slope e offset
   calibSlope = (tempCalibVoltage2 - tempCalibVoltage1) / (tempCalibPh2 - tempCalibPh1);
   calibOffset = tempCalibVoltage1 - (calibSlope * tempCalibPh1);
   
@@ -687,14 +677,12 @@ float takeCalibrationReadings() {
   const uint8_t numReadings = 15;
   float readings[numReadings];
   
-  // Coletar leituras
   for (int i = 0; i < numReadings; i++) {
     readings[i] = readPhVoltage();
     delay(1000);
     wdt_reset();
   }
   
-  // Ordenar leituras
   for (int i = 0; i < numReadings - 1; i++) {
     for (int j = i + 1; j < numReadings; j++) {
       if (readings[i] > readings[j]) {
@@ -705,7 +693,6 @@ float takeCalibrationReadings() {
     }
   }
   
-  // Calcular média sem outliers
   float sum = 0;
   for (int i = 2; i < numReadings - 2; i++) {
     sum += readings[i];
@@ -734,7 +721,7 @@ void handleSensorCheck() {
 
 // =========== ATUALIZAÇÃO DO DISPLAY ===========
 void updateDisplay() {
-  if (!needsRedraw) return;
+  if (!needsRedraw || !displayInitialized) return;
   
   lcd.clear();
   
@@ -796,6 +783,7 @@ void updateDisplay() {
 }
 
 void drawBootScreen() {
+  lcd.setCursor(0, 0);
   lcd.print("Sistema Iniciando");
   lcd.setCursor(0, 1);
   lcd.print("Aguarde ");
@@ -816,16 +804,14 @@ void drawMonitoringScreen() {
   // Indicador de atividade
   static uint8_t animFrame = 0;
   static unsigned long lastAnimUpdate = 0;
-  if (millis() - lastAnimUpdate > 250) {
+  if (millis() - lastAnimUpdate > 500) {
     animFrame = (animFrame + 1) % 4;
     lastAnimUpdate = millis();
   }
   char animChars[] = {'|', '/', '-', '\\'};
   
-  // Mensagens de status
   if (isPumpRunning) {
     lcd.print("AJUSTANDO PH     ");
-    // Barra de progresso
     int progress = min(18, (int)((millis() - lastPumpActivation) * 18) / PUMP_RUN_TIME);
     lcd.setCursor(0, 3);
     lcd.print("[");
@@ -838,41 +824,50 @@ void drawMonitoringScreen() {
   } else {
     lcd.print("MONITORANDO ");
     lcd.print(animChars[animFrame]);
+    lcd.print("   ");
   }
   
   if (!isPumpRunning) {
     lcd.setCursor(0, 1);
     lcd.print("PH ATUAL: ");
     lcd.print(currentPh, 2);
+    lcd.print("   ");
     
     lcd.setCursor(0, 2);
-    lcd.print("PH INST: ");
+    lcd.print("PH INST:  ");
     lcd.print(instantPh, 2);
+    lcd.print("   ");
     
     lcd.setCursor(0, 3);
     lcd.print("Temp:");
     lcd.print(currentTemp, 1);
-    lcd.print("C|Ideal:");
+    lcd.print("C Ideal:");
     lcd.print(targetPh, 1);
   }
 }
 
 void drawMainMenu() {
+  lcd.setCursor(0, 0);
   lcd.print("MENU PRINCIPAL");
+  
   lcd.setCursor(0, 1);
-  lcd.print(menuPosition == 0 ? "> " : "  ");
-  lcd.print("Definir PH Ideal");
+  lcd.print(menuPosition == 0 ? ">Definir PH Ideal" : " Definir PH Ideal");
   
   lcd.setCursor(0, 2);
-  lcd.print(menuPosition == 1 ? "> " : "  ");
-  lcd.print("Calibrar Sonda");
+  lcd.print(menuPosition == 1 ? ">Calibrar Sonda  " : " Calibrar Sonda  ");
   
   lcd.setCursor(0, 3);
-  lcd.print(menuPosition == 2 ? "> " : "  ");
-  lcd.print("Menu Tecnico  Voltar");
+  if (menuPosition == 2) {
+    lcd.print(">Menu Tecnico    ");
+  } else if (menuPosition == 3) {
+    lcd.print(">Voltar          ");
+  } else {
+    lcd.print(" Menu Tecnico    ");
+  }
 }
 
 void drawSetPhMenu() {
+  lcd.setCursor(0, 0);
   lcd.print("DEFINIR PH IDEAL");
   lcd.setCursor(0, 1);
   lcd.print("PH Ideal: ");
@@ -882,21 +877,18 @@ void drawSetPhMenu() {
 }
 
 void drawCalibrateMenu() {
+  lcd.setCursor(0, 0);
   lcd.print("CALIBRAR SONDA");
   lcd.setCursor(0, 1);
-  lcd.print(menuPosition == 0 ? "> " : "  ");
-  lcd.print("1 PONTO");
-  
+  lcd.print(menuPosition == 0 ? ">1 PONTO " : " 1 PONTO ");
   lcd.setCursor(0, 2);
-  lcd.print(menuPosition == 1 ? "> " : "  ");
-  lcd.print("2 PONTOS");
-  
+  lcd.print(menuPosition == 1 ? ">2 PONTOS" : " 2 PONTOS");
   lcd.setCursor(0, 3);
-  lcd.print(menuPosition == 2 ? "> " : "  ");
-  lcd.print("Voltar");
+  lcd.print(menuPosition == 2 ? ">Voltar  " : " Voltar  ");
 }
 
 void drawCalibrate1PointMenu() {
+  lcd.setCursor(0, 0);
   lcd.print("CALIBRAR 1 PONTO");
   lcd.setCursor(0, 1);
   lcd.print("Insira a sonda na");
@@ -907,23 +899,24 @@ void drawCalibrate1PointMenu() {
 }
 
 void drawCalibrate1PointSolution() {
+  lcd.setCursor(0, 0);
   lcd.print("SELECIONE SOLUCAO:");
   lcd.setCursor(0, 1);
-  lcd.print(subMenuPosition == 0 ? ">4.01" : "  4.01");
+  lcd.print(subMenuPosition == 0 ? ">4.01" : " 4.01");
   lcd.setCursor(0, 2);
-  lcd.print(subMenuPosition == 1 ? ">7.01" : "  7.01");
+  lcd.print(subMenuPosition == 1 ? ">7.01" : " 7.01");
   lcd.setCursor(0, 3);
-  lcd.print(subMenuPosition == 2 ? ">10.1" : "  10.1");
-  if (subMenuPosition == 3) {
-    lcd.setCursor(10, 3);
-    lcd.print(">Voltar");
+  if (subMenuPosition == 2) {
+    lcd.print(">10.1          ");
+  } else if (subMenuPosition == 3) {
+    lcd.print("          >Voltar");
   } else {
-    lcd.setCursor(10, 3);
-    lcd.print(" Voltar");
+    lcd.print(" 10.1           ");
   }
 }
 
 void drawCalibrate1PointMeasuring() {
+  lcd.setCursor(0, 0);
   lcd.print("CALIBRANDO...");
   lcd.setCursor(0, 1);
   lcd.print("Solucao: ");
@@ -937,6 +930,7 @@ void drawCalibrate1PointMeasuring() {
 }
 
 void drawCalibrate2PointMenu() {
+  lcd.setCursor(0, 0);
   lcd.print("CALIBRAR 2 PONTOS");
   lcd.setCursor(0, 1);
   lcd.print("Insira a sonda na");
@@ -947,26 +941,29 @@ void drawCalibrate2PointMenu() {
 }
 
 void drawCalibrate2PointSolution1() {
+  lcd.setCursor(0, 0);
   lcd.print("SELECIONE SOLUCAO 1:");
   lcd.setCursor(0, 1);
-  lcd.print(subMenuPosition == 0 ? ">4.01" : "  4.01");
+  lcd.print(subMenuPosition == 0 ? ">4.01" : " 4.01");
   lcd.setCursor(0, 2);
-  lcd.print(subMenuPosition == 1 ? ">7.01" : "  7.01");
+  lcd.print(subMenuPosition == 1 ? ">7.01" : " 7.01");
   lcd.setCursor(0, 3);
-  lcd.print(subMenuPosition == 2 ? ">10.1" : "  10.1");
+  lcd.print(subMenuPosition == 2 ? ">10.1" : " 10.1");
 }
 
 void drawCalibrate2PointSolution2() {
+  lcd.setCursor(0, 0);
   lcd.print("SELECIONE SOLUCAO 2:");
   lcd.setCursor(0, 1);
-  lcd.print(subMenuPosition == 0 ? ">4.01" : "  4.01");
+  lcd.print(subMenuPosition == 0 ? ">4.01" : " 4.01");
   lcd.setCursor(0, 2);
-  lcd.print(subMenuPosition == 1 ? ">7.01" : "  7.01");
+  lcd.print(subMenuPosition == 1 ? ">7.01" : " 7.01");
   lcd.setCursor(0, 3);
-  lcd.print(subMenuPosition == 2 ? ">10.1" : "  10.1");
+  lcd.print(subMenuPosition == 2 ? ">10.1" : " 10.1");
 }
 
 void drawCalibrate2PointMeasuring1() {
+  lcd.setCursor(0, 0);
   lcd.print("CALIBRANDO PONTO 1");
   lcd.setCursor(0, 1);
   lcd.print("Solucao: ");
@@ -976,6 +973,7 @@ void drawCalibrate2PointMeasuring1() {
 }
 
 void drawCalibrate2PointMeasuring2() {
+  lcd.setCursor(0, 0);
   lcd.print("CALIBRANDO PONTO 2");
   lcd.setCursor(0, 1);
   lcd.print("Solucao: ");
@@ -985,21 +983,24 @@ void drawCalibrate2PointMeasuring2() {
 }
 
 void drawTechMenu() {
+  lcd.setCursor(0, 0);
   lcd.print("MENU TECNICO");
   lcd.setCursor(0, 1);
-  lcd.print(menuPosition == 0 ? "> " : "  ");
-  lcd.print("Valores Brutos");
-  
+  lcd.print(menuPosition == 0 ? ">Valores Brutos  " : " Valores Brutos  ");
   lcd.setCursor(0, 2);
-  lcd.print(menuPosition == 1 ? "> " : "  ");
-  lcd.print("Checar Sensores");
-  
+  lcd.print(menuPosition == 1 ? ">Checar Sensores " : " Checar Sensores ");
   lcd.setCursor(0, 3);
-  lcd.print(menuPosition == 2 ? "> " : "  ");
-  lcd.print("Reiniciar   Voltar");
+  if (menuPosition == 2) {
+    lcd.print(">Reiniciar       ");
+  } else if (menuPosition == 3) {
+    lcd.print(">Voltar          ");
+  } else {
+    lcd.print(" Reiniciar       ");
+  }
 }
 
 void drawRawValues() {
+  lcd.setCursor(0, 0);
   lcd.print("VALORES BRUTOS");
   lcd.setCursor(0, 1);
   lcd.print("Tensao PH: ");
@@ -1010,6 +1011,7 @@ void drawRawValues() {
 }
 
 void drawSensorCheck() {
+  lcd.setCursor(0, 0);
   lcd.print("TESTANDO SENSORES");
   
   static uint8_t progress = 0;
@@ -1033,6 +1035,7 @@ void drawSensorCheck() {
 }
 
 void drawRestartConfirm() {
+  lcd.setCursor(0, 0);
   lcd.print("REINICIAR SISTEMA?");
   lcd.setCursor(0, 2);
   lcd.print(menuPosition == 0 ? ">SIM" : " SIM");
