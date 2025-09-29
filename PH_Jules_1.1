@@ -47,9 +47,9 @@
 
 // --- Pinos do Arduino ---
 const int PIN_DS18B20 = 2;          // Pino de dados do sensor de temperatura DS18B20
-const int PIN_BTN_MENU = 3;         // Pino do botão MENU
+const int PIN_BTN_MENU = 5;         // Pino do botão MENU (Trocado com UP conforme feedback do usuário)
 const int PIN_BTN_DOWN = 4;         // Pino do botão DOWN
-const int PIN_BTN_UP = 5;           // Pino do botão UP
+const int PIN_BTN_UP = 3;           // Pino do botão UP (Trocado com MENU conforme feedback do usuário)
 const int PIN_MOSFET_PUMP = 6;      // Pino de controle do MOSFET que aciona a bomba de pH Down
 const int PIN_LED_LOW_PH = 7;       // Pino do LED que indica pH baixo
 
@@ -918,12 +918,12 @@ void displayMonitoringScreen() {
   lcd.print(F("   "));
 
   lcd.setCursor(0, 3);
-  lcd.print(F("Temp:"));
+  lcd.print(F("T:"));
   lcd.print(currentTemperature, 1);
-  lcd.print((char)223); // Caractere de grau
-  lcd.print(F("C"));
-  lcd.print(F(" | Ideal:"));
+  lcd.print((char)223);
+  lcd.print(F("C  Ideal:"));
   lcd.print(config.phIdeal, 1);
+  lcd.print(F("     ")); // Limpa o resto da linha
 
   // Mensagem de status de pH
   if (digitalRead(PIN_LED_LOW_PH) == HIGH) {
