@@ -20,7 +20,7 @@
 // ================================================================================================
 #include <Wire.h>                     // Comunicação I2C (para o LCD e ADS1115)
 #include <LiquidCrystal_I2C.h>        // Controle do display LCD
-#include <Adafruit_ADS1015.h>         // Controle do conversor Analógico-Digital de precisão
+#include <Adafruit_ADS1X15.h>         // Controle do conversor Analógico-Digital de precisão
 #include <OneWire.h>                  // Protocolo de comunicação para o sensor de temperatura
 #include <DallasTemperature.h>        // Controle do sensor de temperatura DS18B20
 #include <EEPROM.h>                   // Memória não-volátil para salvar configurações
@@ -147,6 +147,26 @@ bool bombaEmCooldown = false;
 byte indiceAnimacao = 0;
 const char animacaoBarra[] = {'|', '/', '-', '\\'};
 
+// --- Controle do Processo de Calibração ---
+enum EstadoCalibracao {
+  CAL_INICIO,
+  CAL_AGUARDANDO_SONDA,
+  CAL_COLETANDO_PONTO_1,
+  CAL_COLETANDO_PONTO_2,
+  CAL_ERRO,
+  CAL_SUCESSO
+};
+EstadoCalibracao estadoCalibracaoAtual = CAL_INICIO;
+
+float solucaoCalibSelecionada1 = 0.0;
+float solucaoCalibSelecionada2 = 0.0;
+int16_t valorBrutoCalibPonto1 = 0;
+int16_t valorBrutoCalibPonto2 = 0;
+int pontosCalibracao = 0; // 1 ou 2 pontos
+int tentativasCalibracao = 0;
+
+// --- Controle do Menu Técnico ---
+bool reiniciarConfirmado = false; // Para o menu de reinicialização
 
 // ================================================================================================
 // --- PROTÓTIPOS DE FUNÇÕES (DECLARAÇÕES) ---
@@ -255,6 +275,15 @@ void loop() {
     
     // Outras telas não precisam de ações contínuas, apenas reagem aos botões.
     // A atualização do display cuidará de mostrar o conteúdo correto.
+
+     case TELA_CALIBRAR_PROCESSO:
+      loopCalibracao(); // Executa a lógica de calibração em segundo plano
+      break;
+    
+    case TELA_VALORES_BRUTOS:
+      // Lê continuamente o valor bruto para exibição em tempo real
+      valorBrutoADS = ads.readADC_SingleEnded(0);
+      break;
   }
 
   // Atualiza o que é mostrado no display LCD.
@@ -454,6 +483,16 @@ void atualizarDisplay() {
     case TELA_MENU_PRINCIPAL:     exibirTelaMenuPrincipal();      break;
     case TELA_DEFINIR_PH:         exibirTelaDefinirPh();          break;
     // Adicionar chamadas para as outras telas aqui...
+    case TELA_CALIBRAR_MENU:      exibirTelaCalibrarMenu();       break;
+    case TELA_CALIBRAR_1P_SELECAO: exibirTelaCalibrarSelecao();   break;
+    case TELA_CALIBRAR_2P_SELECAO_1: exibirTelaCalibrarSelecao(); break;
+    case TELA_CALIBRAR_2P_SELECAO_2: exibirTelaCalibrarSelecao(solucaoCalibSelecionada1); break;
+    case TELA_CALIBRAR_PROCESSO:  exibirTelaCalibrarProcesso();   break;
+    case TELA_CALIBRAR_ERRO:      exibirTelaCalibrarErro();       break;
+    case TELA_MENU_TECNICO:       exibirTelaMenuTecnico();        break;
+    case TELA_VALORES_BRUTOS:     exibirTelaValoresBrutos();      break;
+    case TELA_CHECAR_SENSORES:    exibirTelaChecarSensores();     break;
+    case TELA_REINICIAR_CONFIRMA: exibirTelaReiniciarConfirma();  break;
   }
 }
 
@@ -548,78 +587,147 @@ void exibirTelaDefinirPh() {
 /**
  * @brief Verifica o estado dos botões e executa a ação correspondente à tela atual.
  */
+// Substitua TODA a sua função verificarBotoes() por esta:
 void verificarBotoes() {
-    static bool menuPressionado = false;
-    static bool upPressionado = false;
-    static bool downPressionado = false;
+    static bool menuPressionado = false, upPressionado = false, downPressionado = false;
+    static unsigned long tempoPressionado = 0;
 
-    // Lógica para detectar a borda de subida (quando o botão é pressionado)
+    // Lógica debounce simples para evitar múltiplas leituras
+    if (millis() - tempoPressionado < 200) {
+        return;
+    }
+
     bool menuAgora = (digitalRead(PINO_BOTAO_MENU) == LOW);
     bool upAgora = (digitalRead(PINO_BOTAO_UP) == LOW);
     bool downAgora = (digitalRead(PINO_BOTAO_DOWN) == LOW);
 
-    // --- BOTÃO MENU ---
-    if (menuAgora && !menuPressionado) {
+    // --- AÇÃO DETECTADA ---
+    if (menuAgora || upAgora || downAgora) {
         resetarTimeoutMenu();
-        // Ações do botão MENU dependem da tela atual
-        switch (telaAtual) {
-            case TELA_MENU_INICIAL:
-                telaAtual = TELA_MONITORAMENTO;
-                break;
-            case TELA_MONITORAMENTO:
-                itemMenuSelecionado = 0;
-                telaAtual = TELA_MENU_PRINCIPAL;
-                break;
-            case TELA_MENU_PRINCIPAL:
-                if (itemMenuSelecionado == 0) { // Definir PH
-                    phIdealTemporario = config.phIdeal; // Carrega valor atual para edição
-                    telaAtual = TELA_DEFINIR_PH;
-                } else if (itemMenuSelecionado == 1) { // Calibrar
-                    //telaAtual = TELA_CALIBRAR_MENU;
-                } else if (itemMenuSelecionado == 2) { // Menu Técnico
-                    //telaAtual = TELA_MENU_TECNICO;
-                }
-                break;
-            case TELA_DEFINIR_PH:
-                config.phIdeal = phIdealTemporario; // Salva o valor
-                salvarConfiguracoes(); // Grava na EEPROM
-                telaAtual = TELA_MONITORAMENTO; // Volta para a tela principal
-                break;
-        }
-    }
-    menuPressionado = menuAgora;
+        tempoPressionado = millis();
 
-    // --- BOTÃO UP ---
-    if (upAgora && !upPressionado) {
-        resetarTimeoutMenu();
-        switch (telaAtual) {
-            case TELA_MENU_PRINCIPAL:
-                itemMenuSelecionado--;
-                if (itemMenuSelecionado < 0) itemMenuSelecionado = 2; // Volta para o último
-                break;
-            case TELA_DEFINIR_PH:
-                phIdealTemporario += 0.1;
-                if (phIdealTemporario > 13.0) phIdealTemporario = 13.0;
-                break;
+        // --- LÓGICA DO BOTÃO MENU ---
+        if (menuAgora) {
+            switch (telaAtual) {
+                case TELA_MONITORAMENTO:
+                    itemMenuSelecionado = 0;
+                    telaAtual = TELA_MENU_PRINCIPAL;
+                    break;
+                case TELA_MENU_PRINCIPAL:
+                    if (itemMenuSelecionado == 0) { // Definir PH
+                        phIdealTemporario = config.phIdeal;
+                        telaAtual = TELA_DEFINIR_PH;
+                    } else if (itemMenuSelecionado == 1) { // Calibrar
+                        itemMenuSelecionado = 0;
+                        telaAtual = TELA_CALIBRAR_MENU;
+                    } else if (itemMenuSelecionado == 2) { // Menu Técnico
+                        itemMenuSelecionado = 0;
+                        telaAtual = TELA_MENU_TECNICO;
+                    } // Adicionar "Voltar" aqui se necessário
+                    break;
+                case TELA_DEFINIR_PH:
+                    config.phIdeal = phIdealTemporario;
+                    salvarConfiguracoes();
+                    telaAtual = TELA_MONITORAMENTO;
+                    break;
+                case TELA_CALIBRAR_MENU:
+                    if (itemMenuSelecionado == 0) { // 1 Ponto
+                        pontosCalibracao = 1;
+                        itemMenuSelecionado = 0;
+                        telaAtual = TELA_CALIBRAR_1P_SELECAO;
+                    } else if (itemMenuSelecionado == 1) { // 2 Pontos
+                        pontosCalibracao = 2;
+                        itemMenuSelecionado = 0;
+                        telaAtual = TELA_CALIBRAR_2P_SELECAO_1;
+                    } else if (itemMenuSelecionado == 2) { // Voltar
+                        telaAtual = TELA_MENU_PRINCIPAL;
+                    }
+                    break;
+                case TELA_CALIBRAR_1P_SELECAO:
+                case TELA_CALIBRAR_2P_SELECAO_1:
+                case TELA_CALIBRAR_2P_SELECAO_2:
+                    // Lógica para selecionar a solução
+                    if(itemMenuSelecionado == 3) { telaAtual = TELA_CALIBRAR_MENU; break; } // Voltar
+                    float solucoes[] = {4.01, 7.00, 10.01};
+                    if(telaAtual == TELA_CALIBRAR_1P_SELECAO) {
+                        solucaoCalibSelecionada1 = solucoes[itemMenuSelecionado];
+                        estadoCalibracaoAtual = CAL_AGUARDANDO_SONDA;
+                        telaAtual = TELA_CALIBRAR_PROCESSO;
+                    } else if (telaAtual == TELA_CALIBRAR_2P_SELECAO_1) {
+                        solucaoCalibSelecionada1 = solucoes[itemMenuSelecionado];
+                        estadoCalibracaoAtual = CAL_AGUARDANDO_SONDA;
+                        telaAtual = TELA_CALIBRAR_PROCESSO;
+                    } else { // TELA_CALIBRAR_2P_SELECAO_2
+                        // ...lógica para selecionar a segunda solução
+                    }
+                    break;
+                case TELA_CALIBRAR_PROCESSO:
+                    if (estadoCalibracaoAtual == CAL_AGUARDANDO_SONDA) {
+                        estadoCalibracaoAtual = (pontosCalibracao == 1 || solucaoCalibSelecionada2 == 0.0) ? CAL_COLETANDO_PONTO_1 : CAL_COLETANDO_PONTO_2;
+                    } else if (estadoCalibracaoAtual == CAL_SUCESSO) {
+                        telaAtual = TELA_MONITORAMENTO;
+                    }
+                    break;
+                case TELA_CALIBRAR_ERRO:
+                    if(itemMenuSelecionado == 0) { // Tentar Novamente
+                        estadoCalibracaoAtual = CAL_AGUARDANDO_SONDA;
+                        telaAtual = TELA_CALIBRAR_PROCESSO;
+                    } else { // Voltar
+                        telaAtual = TELA_CALIBRAR_MENU;
+                    }
+                    break;
+                case TELA_MENU_TECNICO:
+                    if (itemMenuSelecionado == 0) telaAtual = TELA_VALORES_BRUTOS;
+                    else if (itemMenuSelecionado == 1) telaAtual = TELA_CHECAR_SENSORES;
+                    else if (itemMenuSelecionado == 2) {
+                        reiniciarConfirmado = false;
+                        telaAtual = TELA_REINICIAR_CONFIRMA;
+                    }
+                    break;
+                case TELA_VALORES_BRUTOS:
+                case TELA_CHECAR_SENSORES:
+                    telaAtual = TELA_MENU_TECNICO; // Qualquer botão volta
+                    break;
+                case TELA_REINICIAR_CONFIRMA:
+                    if (!reiniciarConfirmado) { // Se SIM estiver selecionado
+                        reiniciarSistema();
+                    } else { // Se NAO estiver selecionado
+                        telaAtual = TELA_MENU_TECNICO;
+                    }
+                    break;
+            }
+        }
+        // --- LÓGICA DOS BOTÕES UP/DOWN ---
+        else if (upAgora || downAgora) {
+            int direcao = upAgora ? -1 : 1;
+            int maxItens;
+            switch (telaAtual) {
+                case TELA_MENU_PRINCIPAL:
+                case TELA_CALIBRAR_MENU:
+                case TELA_MENU_TECNICO:
+                    maxItens = 3;
+                    itemMenuSelecionado = (itemMenuSelecionado + direcao + maxItens) % maxItens;
+                    break;
+                case TELA_DEFINIR_PH:
+                    phIdealTemporario += (direcao > 0 ? -0.1 : 0.1);
+                    if (phIdealTemporario > 13.0) phIdealTemporario = 13.0;
+                    if (phIdealTemporario < 1.0) phIdealTemporario = 1.0;
+                    break;
+                case TELA_CALIBRAR_1P_SELECAO:
+                case TELA_CALIBRAR_2P_SELECAO_1:
+                    maxItens = 4; // 3 soluções + Voltar
+                    itemMenuSelecionado = (itemMenuSelecionado + direcao + maxItens) % maxItens;
+                    break;
+                case TELA_REINICIAR_CONFIRMA:
+                    reiniciarConfirmado = !reiniciarConfirmado;
+                    break;
+                case TELA_CALIBRAR_ERRO:
+                    maxItens = 2;
+                    itemMenuSelecionado = (itemMenuSelecionado + direcao + maxItens) % maxItens;
+                    break;
+            }
         }
     }
-    upPressionado = upAgora;
-
-    // --- BOTÃO DOWN ---
-    if (downAgora && !downPressionado) {
-        resetarTimeoutMenu();
-        switch (telaAtual) {
-            case TELA_MENU_PRINCIPAL:
-                itemMenuSelecionado++;
-                if (itemMenuSelecionado > 2) itemMenuSelecionado = 0; // Volta para o primeiro
-                break;
-            case TELA_DEFINIR_PH:
-                phIdealTemporario -= 0.1;
-                if (phIdealTemporario < 1.0) phIdealTemporario = 1.0;
-                break;
-        }
-    }
-    downPressionado = downAgora;
 }
 
 
@@ -667,4 +775,244 @@ void definirConfiguracoesPadrao() {
   config.calibOffset = 0.0;
   config.calibSlope = 1.0; // Valores que não afetam o cálculo até a calibração
   config.calibValida = false;
+}
+
+// ================================================================================================
+// --- NOVAS FUNÇÕES (CALIBRAÇÃO E MENU TÉCNICO) ---
+// ================================================================================================
+
+/**
+ * @brief Realiza o processo de obter uma média estável de leituras brutas do sensor.
+ * @param mediaEstavelBruta Referência para a variável que armazenará a média final.
+ * @return true se conseguiu uma leitura estável, false caso contrário.
+ */
+bool obterMediaEstavel(int16_t &mediaEstavelBruta) {
+  int16_t amostras[NUM_LEITURAS_PH];
+  long soma;
+  int numValoresMedia = NUM_LEITURAS_PH - (2 * LEITURAS_DESCARTADAS);
+  
+  int16_t mediaAnterior = 0;
+  int16_t mediaAtual = 0;
+
+  for (int tentativa = 0; tentativa < 5; tentativa++) {
+    // Coleta 15 amostras
+    for (int i = 0; i < NUM_LEITURAS_PH; i++) {
+      amostras[i] = ads.readADC_SingleEnded(0);
+      delay(1000); // Neste caso, delay é necessário para o espaçamento da amostragem
+      wdt_reset(); // Reseta o watchdog durante a espera
+    }
+
+    // Ordena as amostras
+    for (int i = 0; i < NUM_LEITURAS_PH - 1; i++) {
+      for (int j = i + 1; j < NUM_LEITURAS_PH; j++) {
+        if (amostras[j] < amostras[i]) {
+          int16_t temp = amostras[i];
+          amostras[i] = amostras[j];
+          amostras[j] = temp;
+        }
+      }
+    }
+    
+    // Calcula a média descartando extremos
+    soma = 0;
+    for (int i = LEITURAS_DESCARTADAS; i < NUM_LEITURAS_PH - LEITURAS_DESCARTADAS; i++) {
+      soma += amostras[i];
+    }
+    mediaAtual = soma / numValoresMedia;
+    
+    // Na primeira rodada, apenas armazena
+    if (tentativa == 0) {
+      mediaAnterior = mediaAtual;
+      continue;
+    }
+
+    // Compara com a média anterior
+    if (abs(mediaAtual - mediaAnterior) <= 5) { // Tolerância para o valor bruto (ADC)
+      mediaEstavelBruta = mediaAtual;
+      return true; // Sucesso!
+    } else {
+      mediaAnterior = mediaAtual; // Tenta novamente
+    }
+  }
+  return false; // Falhou após 5 tentativas
+}
+
+/**
+ * @brief Lida com a lógica de calibração quando na tela de processo.
+ */
+void loopCalibracao() {
+  if (estadoCalibracaoAtual == CAL_COLETANDO_PONTO_1) {
+    bool sucessoPonto1 = obterMediaEstavel(valorBrutoCalibPonto1);
+    if (sucessoPonto1) {
+      if (pontosCalibracao == 1) {
+        // Calibração de 1 ponto (calcula apenas o offset)
+        float tensao_mV = converterBrutoParaTensao(valorBrutoCalibPonto1);
+        // Em uma calibração de 1 ponto, assumimos um slope ideal.
+        // O mais comum é ajustar o offset para a solução de pH 7.0.
+        // pH = offset - (slope * tensao_mV) => offset = pH + (slope * tensao_mV)
+        // Aqui, usaremos a solução selecionada.
+        config.calibOffset = solucaoCalibSelecionada1 + (config.calibSlope * tensao_mV);
+        config.calibValida = true;
+        salvarConfiguracoes();
+        estadoCalibracaoAtual = CAL_SUCESSO;
+      } else { // Se for calibração de 2 pontos, passa para o próximo passo
+        itemMenuSelecionado = 0; // Reseta o cursor do menu
+        telaAtual = TELA_CALIBRAR_2P_SELECAO_2;
+      }
+    } else {
+      estadoCalibracaoAtual = CAL_ERRO;
+    }
+  } 
+  else if (estadoCalibracaoAtual == CAL_COLETANDO_PONTO_2) {
+    bool sucessoPonto2 = obterMediaEstavel(valorBrutoCalibPonto2);
+    if (sucessoPonto2) {
+      // Calibração de 2 pontos (calcula slope e offset)
+      float v1 = converterBrutoParaTensao(valorBrutoCalibPonto1);
+      float ph1 = solucaoCalibSelecionada1;
+      float v2 = converterBrutoParaTensao(valorBrutoCalibPonto2);
+      float ph2 = solucaoCalibSelecionada2;
+
+      // Calcula o slope (m = deltaY / deltaX)
+      config.calibSlope = (ph1 - ph2) / (v2 - v1);
+      
+      // Calcula o offset usando um dos pontos (c = y - mx)
+      config.calibOffset = ph1 - (config.calibSlope * v1);
+      
+      config.calibValida = true;
+      salvarConfiguracoes();
+      estadoCalibracaoAtual = CAL_SUCESSO;
+    } else {
+      estadoCalibracaoAtual = CAL_ERRO;
+    }
+  }
+}
+
+/**
+ * @brief Reinicia o sistema forçando um reset pelo watchdog.
+ */
+void reiniciarSistema() {
+  lcd.clear();
+  lcd.setCursor(0, 1);
+  lcd.print("Reiniciando...");
+  delay(1000);
+  // Habilita o watchdog com o menor timeout possível e entra em loop infinito.
+  // Isso garante que o watchdog irá disparar e reiniciar o microcontrolador.
+  wdt_enable(WDTO_15MS);
+  while (true) {}
+}
+
+// --- Funções de Exibição das Novas Telas ---
+
+void exibirTelaCalibrarMenu() {
+  lcd.setCursor(0, 0);
+  lcd.print("--- CALIBRAR SONDA ---");
+  lcd.setCursor(0, 1);
+  lcd.print(itemMenuSelecionado == 0 ? "> 1 Ponto" : "  1 Ponto");
+  lcd.setCursor(0, 2);
+  lcd.print(itemMenuSelecionado == 1 ? "> 2 Pontos" : "  2 Pontos");
+  lcd.setCursor(0, 3);
+  lcd.print(itemMenuSelecionado == 2 ? "> Voltar" : "  Voltar");
+}
+
+void exibirTelaCalibrarSelecao(float solucaoExcluida = 0.0) {
+  lcd.setCursor(0, 0);
+  lcd.print("Selecione a Solucao:");
+  
+  float solucoes[] = {4.01, 7.00, 10.01};
+  int linha = 1;
+  for (int i = 0; i < 3; i++) {
+    if (solucoes[i] != solucaoExcluida) {
+      lcd.setCursor(0, linha);
+      lcd.print(itemMenuSelecionado == (linha-1) ? "> " : "  ");
+      lcd.print(solucoes[i], 2);
+      linha++;
+    }
+  }
+  lcd.setCursor(0, 3);
+  lcd.print(itemMenuSelecionado == (linha-1) ? "> Voltar" : "  Voltar");
+}
+
+void exibirTelaCalibrarProcesso() {
+  lcd.clear();
+  switch (estadoCalibracaoAtual) {
+    case CAL_AGUARDANDO_SONDA:
+      lcd.setCursor(0, 0);
+      lcd.print("Insira a sonda na");
+      lcd.setCursor(0, 1);
+      lcd.print("solucao ");
+      lcd.print(pontosCalibracao == 1 ? solucaoCalibSelecionada1 : 
+                 (estadoCalibracaoAtual == CAL_COLETANDO_PONTO_1 ? solucaoCalibSelecionada1 : solucaoCalibSelecionada2));
+      lcd.setCursor(0, 3);
+      lcd.print("Press MENU p/ iniciar");
+      break;
+    case CAL_COLETANDO_PONTO_1:
+    case CAL_COLETANDO_PONTO_2:
+      lcd.setCursor(0, 1);
+      lcd.print("Calibrando...");
+      lcd.setCursor(0, 2);
+      lcd.print("Nao mexa na sonda.");
+      break;
+    case CAL_SUCESSO:
+      lcd.setCursor(0, 1);
+      lcd.print("   CALIBRADO COM");
+      lcd.setCursor(0, 2);
+      lcd.print("      SUCESSO!");
+      break;
+  }
+}
+
+void exibirTelaCalibrarErro() {
+    lcd.setCursor(0, 0);
+    lcd.print("!! ERRO DE CALIBRAGEM !!");
+    lcd.setCursor(0, 2);
+    lcd.print(itemMenuSelecionado == 0 ? "> Tentar Novamente" : "  Tentar Novamente");
+    lcd.setCursor(0, 3);
+    lcd.print(itemMenuSelecionado == 1 ? "> Voltar" : "  Voltar");
+}
+
+
+void exibirTelaMenuTecnico() {
+  lcd.setCursor(0, 0);
+  lcd.print("--- MENU TECNICO ---");
+  lcd.setCursor(0, 1);
+  lcd.print(itemMenuSelecionado == 0 ? "> Valores Brutos" : "  Valores Brutos");
+  lcd.setCursor(0, 2);
+  lcd.print(itemMenuSelecionado == 1 ? "> Checar Sensores" : "  Checar Sensores");
+  lcd.setCursor(0, 3);
+  lcd.print(itemMenuSelecionado == 2 ? "> Reiniciar" : "  Reiniciar");
+}
+
+void exibirTelaValoresBrutos() {
+  lcd.setCursor(0, 0);
+  lcd.print("--- VALORES BRUTOS ---");
+  lcd.setCursor(0, 2);
+  lcd.print("Sensor PH (ADC):");
+  lcd.setCursor(0, 3);
+  lcd.print(valorBrutoADS);
+}
+
+void exibirTelaChecarSensores() {
+  // Esta é uma simulação, pois checar o hardware real é complexo.
+  lcd.setCursor(0, 0);
+  lcd.print("Checando Sensores...");
+
+  lcd.setCursor(0, 1);
+  lcd.print("PH: OK");
+  
+  lcd.setCursor(0, 2);
+  lcd.print("Temp: ");
+  // O sensor DS18B20 retorna um valor específico em caso de erro.
+  lcd.print(temperaturaC == DEVICE_DISCONNECTED_C ? "ERRO" : "OK");
+  
+  lcd.setCursor(0, 3);
+  lcd.print("LCD: OK | Botoes: OK");
+}
+
+void exibirTelaReiniciarConfirma() {
+  lcd.setCursor(0, 0);
+  lcd.print("   REINICIAR SISTEMA?");
+  lcd.setCursor(4, 2);
+  lcd.print(reiniciarConfirmado ? "  SIM" : "> SIM");
+  lcd.setCursor(12, 2);
+  lcd.print(reiniciarConfirmado ? "> NAO" : "  NAO");
 }
