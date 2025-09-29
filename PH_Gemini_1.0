@@ -1,0 +1,670 @@
+/**************************************************************************************************
+ * *
+ * PROJETO CONTROLADOR AUTOMÁTICO DE PH PARA CULTIVO INDOOR                        *
+ * *
+ * Descrição: Este firmware controla um sistema de monitoramento e ajuste de pH para            *
+ * soluções de rega. Ele lê sensores de pH e temperatura, exibe os dados em um LCD 20x4,          *
+ * permite a calibração dos sensores e o ajuste do pH ideal através de um menu interativo        *
+ * com botões touch. O sistema ativa uma bomba peristáltica para dosar uma solução redutora      *
+ * de pH quando necessário.                                                                      *
+ * *
+ * Autor: Gemini (Google AI)                                                                     *
+ * Data: 28/09/2025                                                                              *
+ * Versão: 1.0                                                                                   *
+ * *
+ **************************************************************************************************/
+
+
+// ================================================================================================
+// --- INCLUSÃO DE BIBLIOTECAS ---
+// ================================================================================================
+#include <Wire.h>                     // Comunicação I2C (para o LCD e ADS1115)
+#include <LiquidCrystal_I2C.h>        // Controle do display LCD
+#include <Adafruit_ADS1015.h>         // Controle do conversor Analógico-Digital de precisão
+#include <OneWire.h>                  // Protocolo de comunicação para o sensor de temperatura
+#include <DallasTemperature.h>        // Controle do sensor de temperatura DS18B20
+#include <EEPROM.h>                   // Memória não-volátil para salvar configurações
+#include <avr/wdt.h>                  // Watchdog Timer para reinicialização em caso de falha
+
+// ================================================================================================
+// --- DEFINIÇÃO DE CONSTANTES E PINOS (SEM "NÚMEROS MÁGICOS") ---
+// ================================================================================================
+
+// --- PINOS DO ARDUINO ---
+const int PINO_SENSOR_TEMP    = 2;  // Pino de dados do sensor de temperatura DS18B20
+const int PINO_BOTAO_MENU     = 3;  // Pino do botão touch MENU
+const int PINO_BOTAO_DOWN     = 4;  // Pino do botão touch DOWN
+const int PINO_BOTAO_UP       = 5;  // Pino do botão touch UP
+const int PINO_MOSFET_BOMBA   = 6;  // Pino de controle do módulo MOSFET que aciona a bomba
+const int PINO_LED_ALERTA     = 7;  // Pino do LED de alerta (pH baixo)
+
+// --- CONFIGURAÇÕES DO DISPLAY LCD ---
+const int ENDERECO_LCD      = 0x27; // Endereço I2C comum para displays 20x4. Verifique o seu.
+const int COLUNAS_LCD       = 20;   // Número de colunas do display
+const int LINHAS_LCD        = 4;    // Número de linhas do display
+
+// --- CONFIGURAÇÕES DO SENSOR DE PH E ADS1115 ---
+const int NUM_LEITURAS_PH   = 15;   // Número de amostras para calcular a média de pH
+const int LEITURAS_DESCARTADAS = 2; // Número de leituras extremas (altas e baixas) a descartar
+
+// --- CONFIGURAÇÕES DE TEMPO (EM MILISSEGUNDOS) ---
+const unsigned long INTERVALO_LEITURA_INST_MS = 1000;   // Intervalo para leitura do pH instantâneo (1 segundo)
+const unsigned long TIMEOUT_MENU_MS           = 30000;  // Tempo de inatividade para o menu voltar à tela inicial (30 segundos)
+const unsigned long DURACAO_ACIONAMENTO_BOMBA_MS = 1000;  // Tempo que a bomba fica ligada (1 segundo)
+const unsigned long COOLDOWN_BOMBA_MS         = 300000; // Tempo de espera após dosagem para homogeneizar (5 minutos)
+
+// --- PARÂMETROS DE CONTROLE ---
+const float MARGEM_PH_ACIONAMENTO = 0.3; // Variação do pH ATUAL para iniciar uma verificação mais rigorosa
+const float MARGEM_ESTABILIDADE_PH = 0.1; // Variação máxima entre as médias para considerar o pH estável
+const float PH_IDEAL_PADRAO = 7.0;       // Valor padrão para o pH ideal na primeira inicialização
+
+// --- ENDEREÇOS DA MEMÓRIA EEPROM ---
+// Usado para garantir que os dados na EEPROM são válidos.
+const int EEPROM_ADDR_CHECK = 0;
+const int EEPROM_ADDR_CONFIG = sizeof(byte); // Começa após o byte de verificação
+
+// ================================================================================================
+// --- OBJETOS GLOBAIS ---
+// ================================================================================================
+
+LiquidCrystal_I2C lcd(ENDERECO_LCD, COLUNAS_LCD, LINHAS_LCD); // Objeto do display LCD
+Adafruit_ADS1115  ads;                                        // Objeto do conversor AD ADS1115
+OneWire           oneWire(PINO_SENSOR_TEMP);                  // Objeto OneWire para o sensor de temperatura
+DallasTemperature sensors(&oneWire);                          // Objeto para gerenciar o sensor de temperatura
+
+// ================================================================================================
+// --- ESTRUTURAS DE DADOS ---
+// ================================================================================================
+
+// Estrutura para armazenar as configurações que serão salvas na EEPROM.
+// Isso facilita salvar e carregar todos os dados de uma só vez.
+struct Configuracoes {
+  float phIdeal;
+  // Fatores de calibração: pH = (offset) - (slope * tensao_mV)
+  float calibOffset; 
+  float calibSlope;
+  bool calibValida; // Flag para indicar se a calibração já foi feita
+};
+
+Configuracoes config; // Variável global para guardar as configurações atuais do sistema
+
+// Enumeração para controlar as diferentes telas do sistema.
+// Deixa o código mais legível do que usar números.
+enum Tela {
+  TELA_INICIALIZANDO,
+  TELA_MONITORAMENTO,
+  TELA_MENU_INICIAL,
+  TELA_MENU_PRINCIPAL,
+  TELA_DEFINIR_PH,
+  TELA_CALIBRAR_MENU,
+  TELA_CALIBRAR_1P_SELECAO,
+  TELA_CALIBRAR_2P_SELECAO_1,
+  TELA_CALIBRAR_2P_SELECAO_2,
+  TELA_CALIBRAR_PROCESSO,
+  TELA_CALIBRAR_ERRO,
+  TELA_MENU_TECNICO,
+  TELA_VALORES_BRUTOS,
+  TELA_CHECAR_SENSORES,
+  TELA_REINICIAR_CONFIRMA
+};
+
+Tela telaAtual = TELA_INICIALIZANDO; // Variável que controla qual tela está ativa
+
+// ================================================================================================
+// --- VARIÁVEIS GLOBAIS DE ESTADO E CONTROLE ---
+// ================================================================================================
+
+// --- Variáveis de Sensores ---
+float temperaturaC = 0.0;
+float phInstantaneo = 0.0;
+float phAtual = 0.0;
+int16_t valorBrutoADS = 0;
+
+// --- Controle de Tempo (millis) ---
+unsigned long ultimoTempoLeituraInst = 0;
+unsigned long ultimoTempoAtividadeMenu = 0;
+unsigned long ultimoTempoAcionamentoBomba = 0;
+
+// --- Controle do Processo de Leitura e Média ---
+float leiturasPh[NUM_LEITURAS_PH];
+int indiceLeitura = 0;
+
+// --- Controle de Menus ---
+int itemMenuSelecionado = 0;
+float phIdealTemporario = 0.0;
+
+// --- Controle do Processo de Calibração ---
+float solucaoCalibSelecionada1 = 0.0;
+float solucaoCalibSelecionada2 = 0.0;
+int16_t valorBrutoCalib1 = 0;
+int16_t valorBrutoCalib2 = 0;
+int pontosCalibracao = 0; // 1 ou 2 pontos
+
+// --- Controle da Bomba ---
+bool bombaEmCooldown = false;
+
+// --- Animação ---
+byte indiceAnimacao = 0;
+const char animacaoBarra[] = {'|', '/', '-', '\\'};
+
+
+// ================================================================================================
+// --- PROTÓTIPOS DE FUNÇÕES (DECLARAÇÕES) ---
+// ================================================================================================
+// Ajuda o compilador a encontrar as funções, independentemente da ordem em que são escritas.
+
+void setup();
+void loop();
+
+// Funções de Sensores
+void lerTemperatura();
+void lerPh();
+float converterBrutoParaTensao(int16_t bruto);
+float calcularPh(int16_t valorBruto, float temp);
+
+// Funções de Interface e Display
+void atualizarDisplay();
+void exibirTelaInicializando();
+void exibirTelaMenuInicial();
+void exibirTelaMonitoramento();
+// ... (outras funções de exibição)
+
+// Funções de Navegação e Botões
+void verificarBotoes();
+void resetarTimeoutMenu();
+
+// Funções de Lógica de Controle
+void logicaDeControlePh();
+
+// Funções de Calibração
+void iniciarCalibracao();
+bool processoCalibracaoPonto(float& mediaBrutaEstavel);
+
+// Funções de Configuração (EEPROM)
+void salvarConfiguracoes();
+void carregarConfiguracoes();
+void definirConfiguracoesPadrao();
+
+// ================================================================================================
+// --- FUNÇÃO DE CONFIGURAÇÃO (SETUP) ---
+// Executa uma vez quando o Arduino é ligado ou reiniciado.
+// ================================================================================================
+void setup() {
+  // Inicia o watchdog com um timeout de 2 segundos.
+  // Se o loop() travar por mais de 2s, o Arduino reiniciará.
+  wdt_disable(); // Desabilita para configurar
+  wdt_enable(WDTO_2S);
+
+  // Configura os pinos de entrada (botões) e saída (LED, MOSFET)
+  pinMode(PINO_BOTAO_MENU, INPUT_PULLUP);
+  pinMode(PINO_BOTAO_DOWN, INPUT_PULLUP);
+  pinMode(PINO_BOTAO_UP, INPUT_PULLUP);
+  pinMode(PINO_LED_ALERTA, OUTPUT);
+  pinMode(PINO_MOSFET_BOMBA, OUTPUT);
+
+  // Garante que o LED e a bomba comecem desligados
+  digitalWrite(PINO_LED_ALERTA, LOW);
+  digitalWrite(PINO_MOSFET_BOMBA, LOW);
+
+  // Inicializa a comunicação serial para depuração (opcional)
+  Serial.begin(9600);
+  
+  // Inicializa o display LCD
+  lcd.init();
+  lcd.backlight();
+  exibirTelaInicializando();
+
+  // Inicializa o sensor de temperatura
+  sensors.begin();
+
+  // Inicializa o conversor ADS1115
+  // O ganho determina a faixa de tensão. PGA1 = +/-4.096V, ideal para sensores de 5V.
+  ads.setGain(GAIN_ONE); 
+  ads.begin();
+
+  // Carrega as configurações da memória EEPROM
+  carregarConfiguracoes();
+
+  // Uma pequena pausa para os sensores estabilizarem
+  delay(2000); 
+  
+  // Muda para a tela do menu inicial
+  telaAtual = TELA_MENU_INICIAL;
+  resetarTimeoutMenu();
+}
+
+// ================================================================================================
+// --- FUNÇÃO PRINCIPAL (LOOP) ---
+// Executa continuamente após o setup().
+// ================================================================================================
+void loop() {
+  // Reseta o watchdog a cada ciclo para indicar que o sistema não travou.
+  wdt_reset();
+
+  // Verifica o estado dos botões touch a cada ciclo.
+  verificarBotoes();
+  
+  // Executa as ações da tela atual.
+  // A lógica principal é dividida por telas para manter o código organizado.
+  switch (telaAtual) {
+    case TELA_MONITORAMENTO:
+      lerTemperatura(); // Lê a temperatura
+      lerPh();          // Lê o pH
+      logicaDeControlePh(); // Executa a lógica de ajuste
+      break;
+    
+    // Outras telas não precisam de ações contínuas, apenas reagem aos botões.
+    // A atualização do display cuidará de mostrar o conteúdo correto.
+  }
+
+  // Atualiza o que é mostrado no display LCD.
+  atualizarDisplay();
+
+  // Verifica se o menu está inativo por muito tempo.
+  if (millis() - ultimoTempoAtividadeMenu > TIMEOUT_MENU_MS) {
+    if (telaAtual != TELA_MONITORAMENTO) {
+      // Se não estivermos na tela de monitoramento, volta para ela.
+      // Descarta ajustes não salvos.
+      telaAtual = TELA_MONITORAMENTO;
+    }
+  }
+}
+
+// ================================================================================================
+// --- FUNÇÕES DE SENSORES ---
+// ================================================================================================
+
+/**
+ * @brief Solicita e lê a temperatura do sensor DS18B20.
+ */
+void lerTemperatura() {
+  sensors.requestTemperatures(); 
+  float temp = sensors.getTempCByIndex(0);
+  // Validação simples para evitar leituras erradas (-127 é um erro comum)
+  if (temp != DEVICE_DISCONNECTED_C && temp > -50 && temp < 150) {
+    temperaturaC = temp;
+  }
+}
+
+/**
+ * @brief Realiza a leitura do pH e calcula as médias.
+ */
+void lerPh() {
+  // Esta função é chamada a cada ciclo do loop, mas a leitura só ocorre em intervalos definidos.
+  if (millis() - ultimoTempoLeituraInst >= INTERVALO_LEITURA_INST_MS) {
+    ultimoTempoLeituraInst = millis();
+
+    // Lê o valor bruto do ADS1115
+    valorBrutoADS = ads.readADC_SingleEnded(0);
+    
+    // Calcula o pH instantâneo com compensação de temperatura
+    phInstantaneo = calcularPh(valorBrutoADS, temperaturaC);
+    
+    // Armazena a leitura no array para o cálculo da média
+    leiturasPh[indiceLeitura] = phInstantaneo;
+    indiceLeitura++;
+
+    // Se o array de leituras estiver cheio, calcula a média
+    if (indiceLeitura >= NUM_LEITURAS_PH) {
+      indiceLeitura = 0; // Reseta o índice para a próxima rodada
+      
+      // Ordena o array para facilitar o descarte dos extremos
+      for (int i = 0; i < NUM_LEITURAS_PH - 1; i++) {
+        for (int j = i + 1; j < NUM_LEITURAS_PH; j++) {
+          if (leiturasPh[j] < leiturasPh[i]) {
+            float temp = leiturasPh[i];
+            leiturasPh[i] = leiturasPh[j];
+            leiturasPh[j] = temp;
+          }
+        }
+      }
+
+      // Soma os valores centrais (descartando os extremos)
+      float soma = 0;
+      for (int i = LEITURAS_DESCARTADAS; i < NUM_LEITURAS_PH - LEITURAS_DESCARTADAS; i++) {
+        soma += leiturasPh[i];
+      }
+      
+      // Calcula a média e atualiza o pH Atual
+      int numValoresMedia = NUM_LEITURAS_PH - (2 * LEITURAS_DESCARTADAS);
+      if(numValoresMedia > 0){
+        phAtual = soma / numValoresMedia;
+      }
+    }
+  }
+}
+
+/**
+ * @brief Converte o valor bruto do ADC para milivolts (mV).
+ * @param bruto O valor lido do ADS1115.
+ * @return A tensão correspondente em mV.
+ */
+float converterBrutoParaTensao(int16_t bruto) {
+    // Para ganho 1 (GAIN_ONE), a faixa é +/-4.096V. O valor máximo do ADC de 16 bits é 32767.
+    // Tensão = (valor_bruto / valor_maximo) * faixa_de_tensao
+    return (bruto / 32767.0) * 4096.0;
+}
+
+/**
+ * @brief Calcula o valor de pH a partir do valor bruto do ADC e da temperatura.
+ * @param valorBruto O valor lido do ADS1115.
+ * @param temp A temperatura atual em Celsius.
+ * @return O valor de pH calculado.
+ */
+float calcularPh(int16_t valorBruto, float temp) {
+  if (!config.calibValida) {
+    return 0.0; // Retorna 0 se a sonda não foi calibrada
+  }
+  
+  // Converte o valor bruto para tensão em mV
+  float tensao_mV = converterBrutoParaTensao(valorBruto);
+  
+  // A fórmula de calibração de 2 pontos determina uma reta: y = mx + c
+  // Onde y é o pH, x é a tensão, m é o 'slope' e c é o 'offset'.
+  // pH = offset - (slope * tensao_mV)
+  // A temperatura influencia o 'slope', mas para simplificar e com base
+  // na calibração, usamos os valores diretos obtidos.
+  // Uma compensação mais avançada alteraria o 'slope' com base na equação de Nernst.
+  
+  // Exemplo de cálculo:
+  // (Este é o ponto que a função de calibração irá ajustar)
+  return config.calibOffset - (config.calibSlope * tensao_mV);
+}
+
+
+// ================================================================================================
+// --- FUNÇÕES DE LÓGICA DE CONTROLE ---
+// ================================================================================================
+void logicaDeControlePh() {
+  static float ultimasMedias[3] = {0, 0, 0};
+  static int indiceMedia = 0;
+  static unsigned long tempoUltimaMediaArmazenada = 0;
+  
+  // A cada 15s (quando phAtual é atualizado), armazenamos a nova média
+  if (millis() - tempoUltimaMediaArmazenada > (INTERVALO_LEITURA_INST_MS * NUM_LEITURAS_PH)) {
+    tempoUltimaMediaArmazenada = millis();
+    
+    float phAnterior = ultimasMedias[indiceMedia];
+    
+    // Lógica para descartar a média mais antiga e adicionar a nova
+    if (++indiceMedia >= 3) indiceMedia = 0;
+    ultimasMedias[indiceMedia] = phAtual;
+
+    // Só toma uma ação se tivermos pelo menos 3 médias para comparar
+    if (ultimasMedias[0] != 0 && ultimasMedias[1] != 0 && ultimasMedias[2] != 0) {
+      // Verifica se as três últimas médias estão estáveis (variação menor que 0.1)
+      bool estavel = (abs(ultimasMedias[0] - ultimasMedias[1]) <= MARGEM_ESTABILIDADE_PH) &&
+                     (abs(ultimasMedias[1] - ultimasMedias[2]) <= MARGEM_ESTABILIDADE_PH);
+      
+      if (estavel) {
+        // Se o pH está estável, podemos tomar uma decisão
+        
+        // --- CONDIÇÃO DE PH ALTO ---
+        if (phAtual > config.phIdeal) {
+          // Verifica se não estamos no período de cooldown da bomba
+          if (!bombaEmCooldown) {
+            // Ativa a bomba
+            digitalWrite(PINO_MOSFET_BOMBA, HIGH);
+            // TODO: Exibir mensagem "AJUSTANDO PH" na tela
+            delay(DURACAO_ACIONAMENTO_BOMBA_MS); // Usar delay aqui é aceitável, pois é uma ação curta e crítica
+            digitalWrite(PINO_MOSFET_BOMBA, LOW);
+            
+            bombaEmCooldown = true;
+            ultimoTempoAcionamentoBomba = millis();
+            // TODO: Exibir "AJUSTE COMPLETO"
+          }
+        }
+        
+        // --- CONDIÇÃO DE PH BAIXO ---
+        if (phAtual < config.phIdeal) {
+          digitalWrite(PINO_LED_ALERTA, HIGH); // Acende o LED
+        } else {
+          digitalWrite(PINO_LED_ALERTA, LOW); // Apaga o LED se o pH voltou ao normal
+        }
+      }
+    }
+  }
+
+  // Verifica se o tempo de cooldown da bomba já passou
+  if (bombaEmCooldown && (millis() - ultimoTempoAcionamentoBomba > COOLDOWN_BOMBA_MS)) {
+    bombaEmCooldown = false;
+  }
+}
+
+// ================================================================================================
+// --- FUNÇÕES DE INTERFACE E DISPLAY ---
+// ================================================================================================
+/**
+ * @brief Função central que decide qual tela desenhar no LCD.
+ */
+void atualizarDisplay() {
+  static unsigned long ultimoTempoUpdate = 0;
+  // Limita a atualização do display para evitar flickering (piscar)
+  if (millis() - ultimoTempoUpdate < 250) {
+    return;
+  }
+  ultimoTempoUpdate = millis();
+  
+  lcd.clear();
+
+  switch (telaAtual) {
+    case TELA_INICIALIZANDO:      exibirTelaInicializando();      break;
+    case TELA_MENU_INICIAL:       exibirTelaMenuInicial();        break;
+    case TELA_MONITORAMENTO:      exibirTelaMonitoramento();      break;
+    case TELA_MENU_PRINCIPAL:     exibirTelaMenuPrincipal();      break;
+    case TELA_DEFINIR_PH:         exibirTelaDefinirPh();          break;
+    // Adicionar chamadas para as outras telas aqui...
+  }
+}
+
+void exibirTelaInicializando() {
+  lcd.setCursor(0, 0);
+  lcd.print("Controlador de PH");
+  lcd.setCursor(0, 1);
+  lcd.print("Inicializando...");
+  lcd.setCursor(0, 2);
+  lcd.print("Aguarde sensores...");
+}
+
+void exibirTelaMenuInicial() {
+  lcd.setCursor(0, 0);
+  lcd.print("   BEM-VINDO!");
+  lcd.setCursor(0, 2);
+  lcd.print("> Monitorar");
+  lcd.setCursor(0, 3);
+  lcd.print("  Calibrar Sonda");
+  // Adicionar outras opções se necessário...
+}
+
+void exibirTelaMonitoramento() {
+  // Linha 1: Título e animação
+  lcd.setCursor(0, 0);
+  // Mensagem de alerta de pH baixo
+  if (digitalRead(PINO_LED_ALERTA) == HIGH) {
+    lcd.print("!! PH ABAIXO IDEAL !!");
+  } else {
+    lcd.print("MONITORANDO ");
+    lcd.print(animacaoBarra[indiceAnimacao++]);
+    if (indiceAnimacao >= sizeof(animacaoBarra)) indiceAnimacao = 0;
+  }
+  
+  // Linha 2: PH Atual e Instantâneo
+  lcd.setCursor(0, 1);
+  lcd.print("PH ATUAL: ");
+  lcd.print(phAtual, 2); // 2 casas decimais
+  
+  lcd.setCursor(0, 2);
+  lcd.print("PH INST:  ");
+  lcd.print(phInstantaneo, 2);
+
+  // Linha 4: Temperatura e pH Ideal
+  lcd.setCursor(0, 3);
+  lcd.print("Temp: ");
+  lcd.print(temperaturaC, 1);
+  lcd.print((char)223); // Símbolo de grau
+  lcd.print("C");
+  
+  lcd.setCursor(10, 3);
+  lcd.print("|Ideal: ");
+  lcd.print(config.phIdeal, 1);
+}
+
+void exibirTelaMenuPrincipal() {
+  lcd.setCursor(0, 0);
+  lcd.print("--- MENU PRINCIPAL ---");
+  
+  // Mostra o cursor '>' na opção selecionada
+  lcd.setCursor(0, 1);
+  lcd.print(itemMenuSelecionado == 0 ? ">" : " ");
+  lcd.print(" Definir PH Ideal");
+
+  lcd.setCursor(0, 2);
+  lcd.print(itemMenuSelecionado == 1 ? ">" : " ");
+  lcd.print(" Calibrar Sonda");
+
+  lcd.setCursor(0, 3);
+  lcd.print(itemMenuSelecionado == 2 ? ">" : " ");
+  lcd.print(" Menu Tecnico");
+  
+  // Adicionar "Voltar" se houver mais itens
+}
+
+void exibirTelaDefinirPh() {
+    lcd.setCursor(0, 0);
+    lcd.print("--- DEFINIR PH IDEAL ---");
+
+    lcd.setCursor(2, 2);
+    lcd.print("PH Ideal: ");
+    lcd.print(phIdealTemporario, 1);
+
+    lcd.setCursor(0, 3);
+    lcd.print("Press. MENU p/ salvar");
+}
+
+
+// ================================================================================================
+// --- FUNÇÕES DE NAVEGAÇÃO E BOTÕES ---
+// ================================================================================================
+/**
+ * @brief Verifica o estado dos botões e executa a ação correspondente à tela atual.
+ */
+void verificarBotoes() {
+    static bool menuPressionado = false;
+    static bool upPressionado = false;
+    static bool downPressionado = false;
+
+    // Lógica para detectar a borda de subida (quando o botão é pressionado)
+    bool menuAgora = (digitalRead(PINO_BOTAO_MENU) == LOW);
+    bool upAgora = (digitalRead(PINO_BOTAO_UP) == LOW);
+    bool downAgora = (digitalRead(PINO_BOTAO_DOWN) == LOW);
+
+    // --- BOTÃO MENU ---
+    if (menuAgora && !menuPressionado) {
+        resetarTimeoutMenu();
+        // Ações do botão MENU dependem da tela atual
+        switch (telaAtual) {
+            case TELA_MENU_INICIAL:
+                telaAtual = TELA_MONITORAMENTO;
+                break;
+            case TELA_MONITORAMENTO:
+                itemMenuSelecionado = 0;
+                telaAtual = TELA_MENU_PRINCIPAL;
+                break;
+            case TELA_MENU_PRINCIPAL:
+                if (itemMenuSelecionado == 0) { // Definir PH
+                    phIdealTemporario = config.phIdeal; // Carrega valor atual para edição
+                    telaAtual = TELA_DEFINIR_PH;
+                } else if (itemMenuSelecionado == 1) { // Calibrar
+                    //telaAtual = TELA_CALIBRAR_MENU;
+                } else if (itemMenuSelecionado == 2) { // Menu Técnico
+                    //telaAtual = TELA_MENU_TECNICO;
+                }
+                break;
+            case TELA_DEFINIR_PH:
+                config.phIdeal = phIdealTemporario; // Salva o valor
+                salvarConfiguracoes(); // Grava na EEPROM
+                telaAtual = TELA_MONITORAMENTO; // Volta para a tela principal
+                break;
+        }
+    }
+    menuPressionado = menuAgora;
+
+    // --- BOTÃO UP ---
+    if (upAgora && !upPressionado) {
+        resetarTimeoutMenu();
+        switch (telaAtual) {
+            case TELA_MENU_PRINCIPAL:
+                itemMenuSelecionado--;
+                if (itemMenuSelecionado < 0) itemMenuSelecionado = 2; // Volta para o último
+                break;
+            case TELA_DEFINIR_PH:
+                phIdealTemporario += 0.1;
+                if (phIdealTemporario > 13.0) phIdealTemporario = 13.0;
+                break;
+        }
+    }
+    upPressionado = upAgora;
+
+    // --- BOTÃO DOWN ---
+    if (downAgora && !downPressionado) {
+        resetarTimeoutMenu();
+        switch (telaAtual) {
+            case TELA_MENU_PRINCIPAL:
+                itemMenuSelecionado++;
+                if (itemMenuSelecionado > 2) itemMenuSelecionado = 0; // Volta para o primeiro
+                break;
+            case TELA_DEFINIR_PH:
+                phIdealTemporario -= 0.1;
+                if (phIdealTemporario < 1.0) phIdealTemporario = 1.0;
+                break;
+        }
+    }
+    downPressionado = downAgora;
+}
+
+
+/**
+ * @brief Reseta o contador de tempo de inatividade do menu.
+ */
+void resetarTimeoutMenu() {
+  ultimoTempoAtividadeMenu = millis();
+}
+
+// ================================================================================================
+// --- FUNÇÕES DE CONFIGURAÇÃO (EEPROM) ---
+// ================================================================================================
+/**
+ * @brief Salva a estrutura 'config' na memória EEPROM.
+ */
+void salvarConfiguracoes() {
+  // Grava um byte de verificação para saber que os dados são válidos
+  EEPROM.update(EEPROM_ADDR_CHECK, 'S'); // 'S' de Salvo
+  // Usa EEPROM.put() que consegue gravar estruturas inteiras
+  EEPROM.put(EEPROM_ADDR_CONFIG, config);
+}
+
+/**
+ * @brief Carrega as configurações da EEPROM para a estrutura 'config'.
+ */
+void carregarConfiguracoes() {
+  // Verifica se o byte de verificação existe
+  if (EEPROM.read(EEPROM_ADDR_CHECK) == 'S') {
+    // Se sim, os dados são válidos e podem ser carregados
+    EEPROM.get(EEPROM_ADDR_CONFIG, config);
+  } else {
+    // Se não, é a primeira vez que o sistema é ligado ou a memória foi corrompida.
+    // Carrega os valores padrão e salva na EEPROM.
+    definirConfiguracoesPadrao();
+    salvarConfiguracoes();
+  }
+}
+
+/**
+ * @brief Define os valores padrão para as configurações.
+ */
+void definirConfiguracoesPadrao() {
+  config.phIdeal = PH_IDEAL_PADRAO;
+  config.calibOffset = 0.0;
+  config.calibSlope = 1.0; // Valores que não afetam o cálculo até a calibração
+  config.calibValida = false;
+}
