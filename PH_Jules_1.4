@@ -39,110 +39,6 @@
 #include <DallasTemperature.h>      // Para ler a temperatura do DS18B20
 #include <EEPROM.h>                 // Para salvar as configurações de forma permanente
 #include <avr/wdt.h>                // Para usar o Watchdog Timer, que reinicia o Arduino em caso de travamento
-#include <avr/pgmspace.h>           // Para armazenar dados na memória de programa (Flash)
-
-// =====================================================================================================================
-// Citações para o Protetor de Tela (Screensaver)
-// Armazenadas em PROGMEM para economizar a memória RAM (SRAM) que é muito limitada no Arduino Nano.
-// =====================================================================================================================
-const char* const QUOTES[] PROGMEM = {
-  "Seja você mesmo; todo mundo já existe.—Oscar Wilde",
-  "Não deixe a escola atrapalhar sua educação.—Mark Twain",
-  "Não me juntaria a um clube que me aceitasse.—Groucho Marx",
-  "Deus não joga dados.—Albert Einstein",
-  "Nunca, nunca, nunca desista.—Winston Churchill",
-  "Ser ou não ser.—William Shakespeare",
-  "O que não me mata me fortalece.—Friedrich Nietzsche",
-  "Penso, logo existo.—René Descartes",
-  "Conhece-te a ti mesmo.—Sócrates",
-  "A imaginação governa o mundo.—Napoleon Bonaparte",
-  "A vida é aquilo que acontece enquanto planejamos.—John Lennon",
-  "O silêncio é a poesia dos sábios.—Thomas Carlyle",
-  "A esperança é a última que morre.—Provérbio",
-  "Quem disse que só há uma forma de vencer?—Sun Tzu",
-  "Rir é o sol que afasta o inverno do rosto humano.—Victor Hugo",
-  "O tempo é o melhor autor.—A. de Saint-Exupéry",
-  "A arte imita a vida.—Aristóteles",
-  "Faça hoje o que os outros deixam pra depois.—Benjamin Franklin",
-  "A coragem é saber o medo e enfrentá-lo.—Paulo Coelho",
-  "Quem perde a própria loucura encontra a própria razão.—Fernando Pessoa",
-  "Ser grande é se fazer pequeno para ensinar.—Provérbio",
-  "A vida é uma peça de teatro sem ensaio.—Charlie Chaplin",
-  "O sucesso é a soma de pequenos esforços.—Robert Collier",
-  "O sabio aceita o que não pode mudar.—Confúcio",
-  "A simplicidade é o último grau de sofisticação.—Leonardo da Vinci",
-  "Mais vale um pássaro na mão...—Provérbio",
-  "A melhor vingança é o sucesso.—Frank Sinatra",
-  "Seja a mudança que você quer ver.—Mahatma Gandhi",
-  "Não conte seus planos; mostre resultados.—Charles Bukowski",
-  "O riso é a distância mais curta entre dois.—Victor Borge",
-  "Viver é aprender a ganhar e perder.—William Hazlitt",
-  "Errar é humano; persistir no erro é burrice.—Sêneca",
-  "A curiosidade matou o gato; só que o deixou esperto.—Ditado",
-  "A vida começa onde termina o medo.—Osho",
-  "Pior que a mentira é a verdade maldita.—Machado de Assis",
-  "Quem não arrisca não petisca.—Provérbio",
-  "A música lava a alma.—Marcus Aurelius",
-  "Amar é mudar a alma de casa.—Mário Quintana",
-  "O futuro pertence aos corajosos.—Anatole France",
-  "A verdade dói, mas liberta.—Bíblia",
-  "Sonhe alto, trabalhe baixo.—Autor moderno",
-  "A sorte favorece os audazes.—Virgílio",
-  "Se quiser paz, prepare-se para lutar.—Vegetius",
-  "O humor é a roupa da inteligência.—Ditado",
-  "Pensar é o trabalho mais difícil que existe.—Henry Ford",
-  "Viva rápido, ame devagar.—Autor popular",
-  "Seja quem és.—Oscar Wilde",
-  "Evite escolas; aprenda vivendo.—Mark Twain",
-  "Não me aceitaria num clube que me aceitasse.—Groucho Marx",
-  "Deus não joga dados.—Albert Einstein",
-  "Nunca desista.—Winston Churchill",
-  "Ser ou não ser.—William Shakespeare",
-  "O que não mata fortalece.—Nietzsche",
-  "Penso, logo existo.—Descartes",
-  "Menos é sempre mais.—Mies van der Rohe",
-  "Conhece-te a ti mesmo.—Sócrates",
-  "Imaginação manda no mundo.—Napoleão",
-  "A vida acontece enquanto planejas.—John Lennon",
-  "Silêncio: poesia dos sábios.—Thomas Carlyle",
-  "A esperança morre por último.—Provérbio",
-  "Vença sem regras? Prove.—Sun Tzu",
-  "Rir afasta o inverno da alma.—Victor Hugo",
-  "O tempo escreve as melhores histórias.—Saint-Exupéry",
-  "Arte imita a vida.—Aristóteles",
-  "Faça hoje o que os outros evitam.—Benjamin Franklin",
-  "Coragem é encarar o medo.—Paulo Coelho",
-  "Perder a loucura é perder a graça.—Fernando Pessoa",
-  "Grande é quem se faz pequeno pra ensinar.—Provérbio",
-  "A vida é teatro sem ensaio.—Charlie Chaplin",
-  "Sucesso = esforço somado.—Robert Collier",
-  "Aceite o que não muda.—Confúcio",
-  "Simplicidade é sofisticação final.—Leonardo da Vinci",
-  "Mais vale um pássaro na mão.—Provérbio",
-  "A melhor vingança: o sucesso.—Frank Sinatra",
-  "Seja a mudança que espera.—Gandhi",
-  "Resultados falam; planos dormem.—Bukowski",
-  "Riso aproxima mais que discurso.—Victor Borge",
-  "Viver é ganhar e aprender a perder.—Hazlitt",
-  "Errar é humano; persistir é burrice.—Sêneca",
-  "Estilo revela caráter.—Leclerc",
-  "Curiosidade deixou o gato esperto.—Ditado",
-  "A vida começa onde o medo termina.—Osho",
-  "Bom senso é raro entre os sensatos.—La Rochefoucauld",
-  "A verdade machuca, mas liberta.—Provérbio",
-  "Quem não arrisca, não petisca.—Provérbio",
-  "Sem música a vida é erro.—Nietzsche",
-  "Amar é mudar a casa da alma.—Mário Quintana",
-  "O futuro ama os audazes.—Anatole France",
-  "A verdade dói — boa terapia.—Provérbio",
-  "Sonhe alto; trabalhe no chão.—Autor moderno",
-  "Sorte sorri para os ousados.—Virgílio",
-  "Paz pede preparo.—Vegetius",
-  "Humor é a roupa da inteligência.—Ditado",
-  "Pensar é o trabalho mais árduo.—Henry Ford",
-  "Viva rápido, ame com calma.—Autor popular"
-};
-const int NUM_QUOTES = sizeof(QUOTES) / sizeof(char*);
 
 // =====================================================================================================================
 // Definição de Constantes (PINOS e CONFIGURAÇÕES)
@@ -186,8 +82,6 @@ const unsigned long SAMPLING_INTERVAL_MS = 1000; // Intervalo entre as amostras 
 
 // --- Configurações de Menu ---
 const unsigned long MENU_TIMEOUT_MS = 30000;    // Tempo de inatividade (30 segundos) para o menu voltar à tela principal
-const unsigned long SCREENSAVER_TIMEOUT_MS = 30000; // Tempo de inatividade para ativar o protetor de tela
-const unsigned long SCREENSAVER_QUOTE_INTERVAL_MS = 10000; // Intervalo para trocar a citação (10 segundos)
 
 // --- Endereços da EEPROM ---
 // A EEPROM é a memória não volátil do Arduino, onde guardamos dados que não podem ser perdidos.
@@ -234,8 +128,7 @@ enum SystemState {
   STATE_TECH_MENU,
   STATE_TECH_RAW_VALUES,
   STATE_TECH_CHECK_SENSORS,
-  STATE_TECH_RESTART_CONFIRM,
-  STATE_SCREENSAVER
+  STATE_TECH_RESTART_CONFIRM
 };
 
 SystemState currentState = STATE_STARTUP; // Estado inicial do sistema
@@ -268,9 +161,6 @@ unsigned long lastActivityTime = 0;   // 'millis()' da última interação do us
 float tempPhIdeal;                    // Valor temporário ao ajustar o pH ideal
 int menuCursor = 0;                   // Posição do cursor nos menus
 bool screenNeedsRedraw = true;        // Flag para controlar a atualização da tela e evitar flickering
-
-// Variáveis do protetor de tela
-unsigned long lastQuoteTime = 0;      // 'millis()' da última vez que a citação foi trocada
 
 // Variáveis para o processo de calibragem
 float calibrationSolutionValue1;      // Valor da primeira solução de calibragem (e.g., 7.01)
@@ -337,13 +227,6 @@ void loop() {
   readButtons();      // Lê o estado dos botões
   readSensors();      // Lê os sensores de pH e temperatura
 
-  // --- Lógica de Controle de pH (executada em segundo plano) ---
-  if (sampleCount >= NUM_SAMPLES) {
-    processPhSamples();
-    checkPhAndControl();
-    sampleCount = 0; // Reseta para a próxima rodada de amostragem
-  }
-
   // --- Máquina de Estados ---
   // O 'switch' direciona a execução para a função que gerencia o estado atual do sistema.
   switch (currentState) {
@@ -394,9 +277,6 @@ void loop() {
       break;
     case STATE_TECH_RESTART_CONFIRM:
       handleTechRestartConfirm();
-      break;
-    case STATE_SCREENSAVER:
-      handleScreensaver();
       break;
   }
 
@@ -480,8 +360,8 @@ void readSensors() {
     // Converte a voltagem para pH, compensando com a temperatura
     currentPhInst = convertVoltageToPh(voltage, currentTemperature);
 
-    // Armazena a amostra para o cálculo da média. Isso acontece em qualquer estado.
-    if (sampleCount < NUM_SAMPLES) {
+    // Armazena a amostra para o cálculo da média
+    if (currentState == STATE_MONITORING && sampleCount < NUM_SAMPLES) {
       phSamples[sampleCount] = currentPhInst;
       sampleCount++;
     }
@@ -523,32 +403,33 @@ float convertVoltageToPh(float voltage, float temperature) {
  * @brief Gerencia o estado de monitoramento principal.
  */
 void handleMonitoring() {
-  // Lógica para evitar flickering: desenha o layout uma vez, depois só atualiza os valores.
+  // Lógica para evitar flickering: desenha o layout e atualiza os valores.
   if (screenNeedsRedraw) {
     drawMonitoringLayout();
-    screenNeedsRedraw = false;
   }
   updateMonitoringValues();
 
-  // A lógica de processamento de pH foi movida para o loop() principal para rodar em segundo plano.
+  // Agora que a tela foi redesenhada (se necessário), reseta a flag para evitar
+  // que o layout seja redesenhado a cada ciclo.
+  screenNeedsRedraw = false;
+
+  // Processa as amostras de pH quando o buffer está cheio
+  if (sampleCount >= NUM_SAMPLES) {
+    processPhSamples();
+    checkPhAndControl();
+    sampleCount = 0; // Reseta para a próxima rodada de amostragem
+  }
 
   // Verifica se o botão MENU foi pressionado para ir ao menu principal
   if (btnMenuPressed) {
     currentState = STATE_MAIN_MENU;
     screenNeedsRedraw = true;
     menuCursor = 0;
-    return; // Retorna para evitar a checagem de inatividade no mesmo ciclo
   }
 
   // Verifica se a bomba está em cooldown
   if (isPumpOnCooldown && (millis() - pumpCooldownStartTime >= PUMP_COOLDOWN_MS)) {
     isPumpOnCooldown = false;
-  }
-
-  // Verifica inatividade para entrar no protetor de tela
-  if (millis() - lastActivityTime > SCREENSAVER_TIMEOUT_MS) {
-    currentState = STATE_SCREENSAVER;
-    screenNeedsRedraw = true;
   }
 }
 
@@ -584,79 +465,6 @@ void handleInitialMenu() {
                 break;
         }
         screenNeedsRedraw = true;
-    }
-}
-
-
-// =====================================================================================================================
-// Funções do Protetor de Tela
-// =====================================================================================================================
-
-/**
- * @brief Exibe uma citação aleatória na tela, formatando-a para caber.
- */
-void displayQuote() {
-    // Buffer para copiar a string da memória de programa para a RAM
-    char buffer[150];
-
-    // Seleciona uma citação aleatória
-    int randomIndex = random(NUM_QUOTES);
-    strcpy_P(buffer, (char*)pgm_read_word(&(QUOTES[randomIndex])));
-
-    // Separa a citação do autor usando '—' como delimitador
-    char* quote = strtok(buffer, "—");
-    char* author = strtok(NULL, "—");
-
-    lcd.clear();
-
-    // Lógica de quebra de linha inteligente
-    String currentLine = "";
-    char* word = strtok(quote, " ");
-    int lineIndex = 0;
-
-    while (word != NULL) {
-        if (currentLine.length() + strlen(word) + 1 > LCD_COLUMNS) {
-            lcd.setCursor(0, lineIndex);
-            lcd.print(currentLine);
-            lineIndex++;
-            currentLine = "";
-        }
-        if (currentLine.length() > 0) {
-            currentLine += " ";
-        }
-        currentLine += word;
-        word = strtok(NULL, " ");
-    }
-    // Imprime a última linha da citação
-    if (currentLine.length() > 0) {
-        lcd.setCursor(0, lineIndex);
-        lcd.print(currentLine);
-    }
-
-    // Imprime o autor na última linha
-    if (author != NULL) {
-        lcd.setCursor(0, 3);
-        lcd.print("- ");
-        lcd.print(author);
-    }
-}
-
-/**
- * @brief Gerencia o estado do protetor de tela.
- */
-void handleScreensaver() {
-    // Sai do protetor de tela se qualquer botão for pressionado
-    if (btnMenuPressed || btnUpPressed || btnDownPressed) {
-        currentState = STATE_MONITORING;
-        screenNeedsRedraw = true;
-        lastActivityTime = millis(); // Reseta o timer de inatividade
-        return;
-    }
-
-    // Troca a citação a cada 10 segundos
-    if (millis() - lastQuoteTime > SCREENSAVER_QUOTE_INTERVAL_MS) {
-        displayQuote();
-        lastQuoteTime = millis();
     }
 }
 
@@ -1266,8 +1074,7 @@ void displayStartupMessage() {
  */
 void drawMonitoringLayout() {
   lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(F("MONITORANDO"));
+  // A linha de título (linha 0) será gerenciada por updateMonitoringValues()
 
   lcd.setCursor(0, 1);
   lcd.print(F("PH ATUAL: "));
@@ -1291,27 +1098,26 @@ void updateMonitoringValues() {
   static bool wasLowPh = false;
   bool isLowPh = (digitalRead(PIN_LED_LOW_PH) == HIGH);
 
-  // Atualiza a linha de título/status
-  if (isLowPh) {
-    if (!wasLowPh) { // Apenas redesenha se o status mudou
-        lcd.setCursor(0, 0);
-        lcd.print(F(" PH ABAIXO DO IDEAL "));
-        wasLowPh = true;
-    }
-  } else {
-    // Se não há aviso, exibe o título normal e o spinner.
-    if (wasLowPh) { // Se o status de pH baixo foi desativado, precisa limpar a linha inteira.
-      lcd.setCursor(0, 0);
-      lcd.print(F("                    "));
-      wasLowPh = false;
-    }
-    // Redesenha o título e o spinner para garantir que não haja corrupção e para animar.
+  // A flag 'screenNeedsRedraw' ou uma mudança no status de alerta força a
+  // atualização completa da linha de status, crucial ao retornar de um menu.
+  if (screenNeedsRedraw || (isLowPh != wasLowPh)) {
     lcd.setCursor(0, 0);
-    lcd.print(F("MONITORANDO"));
+    if (isLowPh) {
+      lcd.print(F(" PH ABAIXO DO IDEAL "));
+    } else {
+      lcd.print(F("MONITORANDO         ")); // Limpa a linha com espaços
+    }
+  }
+
+  // Se não há alerta, anima o spinner. Isso é feito fora do bloco 'if' anterior
+  // para que a animação continue a cada ciclo, mas o texto não seja reescrito.
+  if (!isLowPh) {
     lcd.setCursor(12, 0); // Posição para o spinner
     lcd.print(spinner[spinnerPos]);
     spinnerPos = (spinnerPos + 1) % 4;
   }
+
+  wasLowPh = isLowPh; // Salva o estado atual do alerta para a próxima verificação
 
   // Atualiza a média de pH
   lcd.setCursor(10, 1);
