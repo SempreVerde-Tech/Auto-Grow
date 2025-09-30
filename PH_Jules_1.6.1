@@ -2,7 +2,7 @@
  * Controlador de PH Automático para Cultivo
  *
  * Autor: Jules (Assistente de IA)
- * Versão: 1.6.1
+ * Versão: 1.0
  * Data: 2024-07-25
  *
  * Descrição:
@@ -242,7 +242,7 @@ void setup() {
   pinMode(PIN_BTN_DOWN, INPUT_PULLUP);
   pinMode(PIN_MOSFET_PUMP, OUTPUT);
   pinMode(PIN_LED_LOW_PH, OUTPUT);
-  digitalWrite(PIN_MOSFET_PUMP, LOW); // Garante que a bomba comece desligada
+  digitalWrite(PIN_MOSFET_PUMP, LOW); // Garante que a bomba comece DESLIGADA (MOSFET é ativado com sinal HIGH)
   digitalWrite(PIN_LED_LOW_PH, LOW);  // Garante que o LED comece desligado
 
   // --- Inicialização dos Módulos I2C e Sensores ---
@@ -716,11 +716,11 @@ void handleMainMenu() {
   }
 
   if (btnUpPressed) {
-    menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3;
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 4; // 5 opções (0-4)
     screenNeedsRedraw = true;
   }
   if (btnDownPressed) {
-    menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0;
+        menuCursor = (menuCursor < 4) ? menuCursor + 1 : 0; // 5 opções (0-4)
     screenNeedsRedraw = true;
   }
 
@@ -844,11 +844,11 @@ void handleCalib1PointSelect() {
         return;
     }
     if (btnUpPressed) {
-        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3;
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3; // 4 opções (0-3)
         screenNeedsRedraw = true;
     }
     if (btnDownPressed) {
-        menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0;
+        menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0; // 4 opções (0-3)
         screenNeedsRedraw = true;
     }
 
@@ -883,11 +883,11 @@ void handleCalib2PointsSelect1() {
         return;
     }
     if (btnUpPressed) {
-        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 4; // Corrigido para 5 opções (0-4)
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3;
         screenNeedsRedraw = true;
     }
     if (btnDownPressed) {
-        menuCursor = (menuCursor < 4) ? menuCursor + 1 : 0; // Corrigido para 5 opções (0-4)
+        menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0;
         screenNeedsRedraw = true;
     }
 
@@ -1060,11 +1060,11 @@ void handleTechMenu() {
         return;
     }
     if (btnUpPressed) {
-        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3;
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 4; // 5 opções (0-4)
         screenNeedsRedraw = true;
     }
     if (btnDownPressed) {
-        menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0;
+        menuCursor = (menuCursor < 4) ? menuCursor + 1 : 0; // 5 opções (0-4)
         screenNeedsRedraw = true;
     }
 
@@ -1167,18 +1167,17 @@ void handleTechActivatePump() {
     }
 
     // Lógica de controle direto da bomba.
-    // O pino do botão UP usa INPUT_PULLUP, então seu estado é LOW quando pressionado.
+    // O pino do botão UP usa INPUT_PULLUP (LOW quando pressionado).
+    // O MOSFET é ativado com sinal HIGH.
     if (digitalRead(PIN_BTN_UP) == LOW) {
-        // Botão UP está pressionado, então LIGA a bomba.
-        digitalWrite(PIN_MOSFET_PUMP, HIGH);
+        digitalWrite(PIN_MOSFET_PUMP, HIGH); // Botão pressionado, LIGA a bomba.
     } else {
-        // Botão UP não está pressionado, então DESLIGA a bomba.
-        digitalWrite(PIN_MOSFET_PUMP, LOW);
+        digitalWrite(PIN_MOSFET_PUMP, LOW); // Botão solto, DESLIGA a bomba.
     }
 
     // Lógica para sair do menu
     if (btnMenuPressed) {
-        digitalWrite(PIN_MOSFET_PUMP, LOW); // Garante que a bomba seja desligada ao sair
+        digitalWrite(PIN_MOSFET_PUMP, LOW); // Garante que a bomba seja desligada (estado LOW) ao sair
         currentState = STATE_TECH_MENU;
         menuCursor = 2; // Volta para a opção "Ativar Bomba"
         screenNeedsRedraw = true;
@@ -1210,7 +1209,7 @@ void handleTechRestartConfirm() {
         } else { // NÃO
             currentState = STATE_TECH_MENU;
             screenNeedsRedraw = true;
-            menuCursor = 3; // Corrigido para apontar para "Reiniciar"
+            menuCursor = 3; // Corrected to point to "Reiniciar"
         }
     }
 }
@@ -1278,9 +1277,9 @@ void checkPhAndControl() {
  */
 void activatePump() {
   displayPumpActionScreen(true);
-  digitalWrite(PIN_MOSFET_PUMP, HIGH);
+  digitalWrite(PIN_MOSFET_PUMP, HIGH); // LIGA a bomba (ativo em HIGH)
   delay(PUMP_DURATION_MS); // Neste caso, um delay é aceitável pois é uma ação curta e crítica
-  digitalWrite(PIN_MOSFET_PUMP, LOW);
+  digitalWrite(PIN_MOSFET_PUMP, LOW); // DESLIGA a bomba
   displayPumpActionScreen(false);
 
   isPumpOnCooldown = true;
