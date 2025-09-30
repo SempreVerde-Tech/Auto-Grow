@@ -1,0 +1,1797 @@
+/***********************************************************************************************************************
+ * Controlador de PH Automático para Cultivo
+ *
+ * Autor: Jules (Assistente de IA)
+ * Versão: 1.7.4
+ * Data: 2024-07-25
+ *
+ * Descrição:
+ * Este código implementa um sistema de controle de pH automatizado para soluções de rega em cultivos.
+ * Ele monitora continuamente o pH e a temperatura da solução, ajustando o pH para baixo quando
+ * ele excede um valor ideal definido pelo usuário. O sistema é projetado para ser seguro,
+ * estável e fácil de usar, com um menu interativo em uma tela LCD.
+ *
+ * Hardware Necessário:
+ * - Arduino Nano
+ * - Tela LCD I2C 20x4
+ * - Módulo ADC ADS1115
+ * - Sensor de Temperatura DS18B20
+ * - Sonda de pH com módulo amplificador
+ * - 3 Botões (MENU, UP, DOWN)
+ * - Módulo MOSFET para acionar a bomba
+ * - Bomba Peristáltica 5V
+ * - LED indicador
+ *
+ * Bibliotecas Externas Necessárias (Instalar via Gerenciador de Bibliotecas do Arduino):
+ * - LiquidCrystal_I2C by Frank de Brabander
+ * - Adafruit ADS1X15 by Adafruit
+ * - OneWire by Paul Stoffregen
+ * - DallasTemperature by Miles Burton
+ ***********************************************************************************************************************/
+
+// =====================================================================================================================
+// Inclusão de Bibliotecas
+// =====================================================================================================================
+#include <Wire.h>                   // Para comunicação I2C (LCD e ADS1115)
+#include <LiquidCrystal_I2C.h>      // Para controlar a tela LCD I2C
+#include <Adafruit_ADS1X15.h>       // Para ler dados do ADC ADS1115
+#include <OneWire.h>                // Para comunicação com o sensor de temperatura DS18B20
+#include <DallasTemperature.h>      // Para ler a temperatura do DS18B20
+#include <EEPROM.h>                 // Para salvar as configurações de forma permanente
+#include <avr/wdt.h>                // Para usar o Watchdog Timer, que reinicia o Arduino em caso de travamento
+
+// =====================================================================================================================
+// Definição de Constantes (PINOS e CONFIGURAÇÕES)
+// Usar constantes nomeadas em vez de "números mágicos" torna o código mais legível e fácil de manter.
+// =====================================================================================================================
+
+// --- Pinos do Arduino ---
+const int PIN_DS18B20 = 2;          // Pino de dados do sensor de temperatura DS18B20
+const int PIN_BTN_MENU = 5;         // Pino do botão MENU (Trocado com UP conforme feedback do usuário)
+const int PIN_BTN_DOWN = 4;         // Pino do botão DOWN
+const int PIN_BTN_UP = 3;           // Pino do botão UP (Trocado com MENU conforme feedback do usuário)
+const int PIN_MOSFET_PUMP = 6;      // Pino de controle do MOSFET que aciona a bomba de pH Down
+const int PIN_LED_LOW_PH = 7;       // Pino do LED que indica pH baixo
+
+// --- Configurações da Tela LCD ---
+const int LCD_COLUMNS = 20;         // Número de colunas da tela LCD
+const int LCD_ROWS = 4;             // Número de linhas da tela LCD
+const int LCD_ADDRESS = 0x27;       // Endereço I2C da tela LCD. Pode ser 0x3F em alguns modelos.
+
+// --- Configurações do ADC ADS1115 ---
+const int ADS1115_ADDRESS = 0x48;   // Endereço I2C do ADS1115 (ADDR para GND)
+// O ADS1115 será usado para ler o valor analógico da sonda de pH com mais precisão.
+const int ADS_CHANNEL_PH = 0;       // Sonda de pH conectada ao canal analógico A0 do ADS1115.
+
+// --- Configurações dos Botões ---
+// Os botões são configurados com pull-up interno, então o estado pressionado é LOW.
+const int BUTTON_DEBOUNCE_DELAY = 50; // Tempo em milissegundos para evitar leituras múltiplas de um único clique (debounce)
+
+// --- Configurações de Controle de pH ---
+const float PH_IDEAL_DEFAULT = 7.0;             // Valor padrão para o pH ideal
+const float PH_CONTROL_THRESHOLD = 0.3;         // Variação de pH que inicia uma checagem de controle
+const float PH_STABILITY_THRESHOLD = 0.1;       // Variação máxima entre médias para considerar a leitura estável
+const unsigned long PUMP_DURATION_MS_DEFAULT = 1000; // Duração padrão que a bomba fica ligada (1s)
+const unsigned long PUMP_COOLDOWN_MS = 300000;  // Tempo de espera (5 minutos) antes de acionar a bomba novamente
+
+// --- Configurações de Leitura e Calibragem ---
+const int NUM_SAMPLES = 15;                     // Número de amostras para calcular a média de pH
+const int NUM_SAMPLES_TO_DISCARD = 2;           // Número de amostras a serem descartadas (as mais altas e as mais baixas)
+const int CALIBRATION_MAX_ATTEMPTS = 5;         // Número máximo de tentativas de estabilização na calibragem
+const unsigned long SAMPLING_INTERVAL_MS = 1000; // Intervalo entre as amostras de pH (1 segundo)
+
+// --- Configurações de Menu ---
+const unsigned long MENU_TIMEOUT_MS = 30000;    // Tempo de inatividade (30 segundos) para o menu voltar à tela principal
+const unsigned long SCREENSAVER_TIMEOUT_MS = 30000; // Tempo de inatividade na tela principal para ligar o screensaver
+
+// --- Endereços da EEPROM ---
+// A EEPROM é a memória não volátil do Arduino, onde guardamos dados que não podem ser perdidos.
+const int EEPROM_ADDR_MAGIC = 0;                // Endereço para um "número mágico" que verifica se a EEPROM foi inicializada
+const int EEPROM_ADDR_CONFIG = sizeof(int);     // Endereço onde a estrutura de configuração será armazenada
+const int EEPROM_MAGIC_VALUE = 12345;           // Valor do "número mágico"
+
+// =====================================================================================================================
+// Declaração de Objetos e Estruturas de Dados
+// =====================================================================================================================
+
+// --- Objetos dos Sensores e Atuadores ---
+LiquidCrystal_I2C lcd(LCD_ADDRESS, LCD_COLUMNS, LCD_ROWS); // Objeto para a tela LCD
+Adafruit_ADS1115 ads;                                      // Objeto para o ADC
+OneWire oneWire(PIN_DS18B20);                              // Objeto OneWire para o sensor de temperatura
+DallasTemperature tempSensor(&oneWire);                    // Objeto para ler a temperatura
+
+// --- Estrutura para armazenar as configurações ---
+// Agrupar dados relacionados em uma 'struct' organiza o código e facilita o salvamento na EEPROM.
+struct SystemConfig {
+  float phIdeal;                // pH ideal definido pelo usuário
+  float calibOffsetVoltage;     // Tensão de offset (valor lido em pH 7.0)
+  float calibSlope;             // Inclinação da curva de pH (calculada na calibragem de 2 pontos)
+  bool isCalibrated2Points;     // Flag para saber se a calibragem de 2 pontos foi feita
+  unsigned long pumpDurationMs; // Duração que a bomba fica ligada (em milissegundos)
+};
+
+SystemConfig config; // Variável global que conterá todas as configurações do sistema
+
+// --- Enumeração para os estados do sistema (Máquina de Estados) ---
+// Usar uma máquina de estados evita o uso de 'delay()' e torna o código mais robusto e não-bloqueante.
+enum SystemState {
+  STATE_STARTUP,
+  STATE_INITIAL_MENU,
+  STATE_MONITORING,
+  STATE_SCREENSAVER,
+  STATE_MAIN_MENU,
+  STATE_SET_PH_IDEAL,
+  STATE_CALIBRATION_MENU,
+  STATE_CALIBRATION_1_POINT_SELECT,
+  STATE_CALIBRATION_2_POINTS_SELECT_1,
+  STATE_CALIBRATION_2_POINTS_SELECT_2,
+  STATE_CALIBRATE_WAIT_FOR_POINT, // Novo estado: aguarda o usuário inserir a sonda
+  STATE_CALIBRATE_READING,        // Novo estado: realiza a leitura da calibração
+  STATE_CALIBRATION_ERROR,
+  STATE_TECH_MENU,
+  STATE_TECH_RAW_VALUES,
+  STATE_TECH_CHECK_SENSORS,
+  STATE_TECH_ACTIVATE_PUMP,
+  STATE_TECH_SET_PUMP_TIMER, // Novo estado para ajustar o tempo da bomba
+  STATE_TECH_RESTART_CONFIRM
+};
+
+SystemState currentState = STATE_STARTUP; // Estado inicial do sistema
+
+// --- Enumeração para o Status do pH ---
+// Ajuda a controlar a lógica de exibição e alertas de forma mais clara.
+enum PhStatus {
+  PH_NORMAL,
+  PH_LOW,
+  PH_HIGH
+};
+PhStatus currentPhStatus = PH_NORMAL; // Estado inicial do pH
+
+// --- Variáveis Globais de Controle ---
+// Variáveis usadas em várias partes do programa para controlar o fluxo e armazenar dados temporários.
+float currentTemperature = 25.0;      // Armazena a última temperatura lida
+float currentPhInst = 7.0;            // Armazena o pH instantâneo (leitura mais recente)
+float currentPhAvg = 7.0;             // Armazena o pH médio (após processamento das amostras)
+
+// Variáveis para o processo de amostragem de pH
+float phSamples[NUM_SAMPLES];         // Array para guardar as amostras de pH
+int sampleCount = 0;                  // Contador de amostras coletadas
+unsigned long lastSampleTime = 0;     // 'millis()' da última amostra
+
+// Variáveis para controle de pH
+float stablePhHistory[3];             // Histórico das últimas 3 médias estáveis de pH
+int stablePhHistoryIndex = 0;         // Índice para o histórico
+bool isPumpOnCooldown = false;        // Flag para indicar se a bomba está no período de espera
+unsigned long pumpCooldownStartTime = 0; // 'millis()' de quando o cooldown da bomba começou
+
+// Variáveis de estado dos botões
+int btnMenuState, btnUpState, btnDownState;
+int lastBtnMenuState = HIGH, lastBtnUpState = HIGH, lastBtnDownState = HIGH;
+unsigned long lastDebounceTime = 0;
+bool btnMenuPressed = false, btnUpPressed = false, btnDownPressed = false;
+
+// Variáveis de controle de menu
+unsigned long lastActivityTime = 0;   // 'millis()' da última interação do usuário com o menu
+float tempPhIdeal;                    // Valor temporário ao ajustar o pH ideal
+unsigned long tempPumpDurationMs;     // Valor temporário ao ajustar o timer da bomba
+int menuCursor = 0;                   // Posição do cursor nos menus
+bool screenNeedsRedraw = true;        // Flag para controlar a atualização da tela e evitar flickering
+
+// Variáveis para o processo de calibragem
+float calibrationSolutionValue1;      // Valor da primeira solução de calibragem (e.g., 7.01)
+float calibrationSolutionValue2;      // Valor da segunda solução de calibragem
+float tempVoltageReading1;            // Armazena a tensão lida para o ponto 1
+float tempVoltageReading2;            // Armazena a tensão lida para o ponto 2
+int calibrationPoint;                 // Para rastrear qual ponto está sendo calibrado (1 ou 2)
+bool isTwoPointCalibration;           // Flag para saber o tipo de calibração em andamento
+
+// =====================================================================================================================
+// Variáveis e Estruturas do Screensaver Tetris
+// =====================================================================================================================
+byte tetrisGrid[LCD_ROWS][LCD_COLUMNS]; // 0 = vazio, 1 = cheio
+
+// Variáveis de estado da animação de blocos
+int currentRow, currentCol;
+unsigned long tetrisLastFallTime = 0;
+bool tetrisAnimationMode = true; // true = preenchendo, false = limpando
+const int TETRIS_FALL_DELAY = 200; // Milissegundos entre cada passo da peça
+
+// Custom character para o bloco do Tetris
+byte blockChar[8] = {
+  B11111,
+  B11111,
+  B11111,
+  B11111,
+  B11111,
+  B11111,
+  B11111,
+  B11111
+};
+
+// Buffers de tela para o screensaver, para evitar flickering.
+// Usar 'byte' em vez de 'char' é mais correto para armazenar tanto caracteres ASCII quanto
+// códigos de caracteres customizados (0-7), evitando potenciais problemas com signed/unsigned char.
+byte lcdBuffer[LCD_ROWS][LCD_COLUMNS];
+byte prevLcdBuffer[LCD_ROWS][LCD_COLUMNS];
+
+
+// =====================================================================================================================
+// Função setup() - Executada uma única vez quando o Arduino é ligado ou resetado
+// =====================================================================================================================
+void setup() {
+  // Inicia o watchdog com um timeout de 8 segundos. Se o loop() travar por mais tempo, o Arduino reiniciará.
+  wdt_disable(); // Desabilita temporariamente para a configuração inicial
+  wdt_enable(WDTO_8S);
+
+  // Inicia a comunicação serial para fins de depuração. Pode ser removida se não for necessária.
+  Serial.begin(9600);
+
+  // --- Inicialização dos Pinos ---
+  pinMode(PIN_BTN_MENU, INPUT_PULLUP); // Botões com resistor de pull-up interno. LOW quando pressionado.
+  pinMode(PIN_BTN_UP, INPUT_PULLUP);
+  pinMode(PIN_BTN_DOWN, INPUT_PULLUP);
+  pinMode(PIN_MOSFET_PUMP, OUTPUT);
+  pinMode(PIN_LED_LOW_PH, OUTPUT);
+  digitalWrite(PIN_MOSFET_PUMP, LOW); // Garante que a bomba comece DESLIGADA (MOSFET é ativado com sinal HIGH)
+  digitalWrite(PIN_LED_LOW_PH, LOW);  // Garante que o LED comece desligado
+
+  // --- Inicialização dos Módulos I2C e Sensores ---
+  lcd.init();
+  lcd.backlight();
+  lcd.createChar(0, blockChar); // Cria o caractere customizado para o bloco do Tetris
+  displayStartupMessage();
+
+  ads.begin();
+  // Configura o ganho do ADC. PGA_ONE oferece uma boa faixa para a maioria dos sensores de pH (até +/- 4.096V)
+  ads.setGain(GAIN_ONE);
+
+  tempSensor.begin();
+
+  // --- Carregamento das Configurações ---
+  loadConfigFromEEPROM();
+
+  // Reseta o watchdog para reiniciar a contagem
+  wdt_reset();
+
+  // Atraso para estabilização dos sensores
+  delay(2000);
+
+  // Muda para o primeiro menu interativo
+  currentState = STATE_INITIAL_MENU;
+  screenNeedsRedraw = true;
+  lastActivityTime = millis();
+}
+
+// =====================================================================================================================
+// Função loop() - Executada continuamente após o setup()
+// =====================================================================================================================
+void loop() {
+  // A primeira coisa a fazer no loop é resetar o watchdog para evitar um reinício inesperado.
+  wdt_reset();
+
+  // --- Leitura e Processamento de Entradas ---
+  readButtons();      // Lê o estado dos botões
+  readSensors();      // Lê os sensores de pH e temperatura
+
+  // --- Lógica de Controle de pH (agora executada globalmente) ---
+  // Garante que o sistema continue monitorando e corrigindo o pH mesmo que o
+  // protetor de tela ou um menu esteja ativo.
+  if (sampleCount >= NUM_SAMPLES) {
+    processPhSamples();
+    checkPhAndControl();
+    sampleCount = 0; // Reseta para a próxima rodada de amostragem
+  }
+
+  // --- Máquina de Estados ---
+  // O 'switch' direciona a execução para a função que gerencia o estado atual do sistema.
+  switch (currentState) {
+    case STATE_STARTUP:
+      // Este estado é gerenciado no setup, aqui apenas aguardamos a transição.
+      break;
+    case STATE_INITIAL_MENU:
+      handleInitialMenu();
+      break;
+    case STATE_MONITORING:
+      handleMonitoring();
+      break;
+    case STATE_SCREENSAVER:
+      handleScreensaver();
+      break;
+    case STATE_MAIN_MENU:
+      handleMainMenu();
+      break;
+    case STATE_SET_PH_IDEAL:
+      handleSetPhIdeal();
+      break;
+    case STATE_CALIBRATION_MENU:
+      handleCalibrationMenu();
+      break;
+    case STATE_CALIBRATION_1_POINT_SELECT:
+      handleCalib1PointSelect();
+      break;
+    case STATE_CALIBRATION_2_POINTS_SELECT_1:
+       handleCalib2PointsSelect1();
+       break;
+    case STATE_CALIBRATION_2_POINTS_SELECT_2:
+       handleCalib2PointsSelect2();
+       break;
+    case STATE_CALIBRATE_WAIT_FOR_POINT:
+      handleCalibrateWaitForPoint();
+      break;
+    case STATE_CALIBRATE_READING:
+      handleCalibrateReading();
+      break;
+    case STATE_CALIBRATION_ERROR:
+      handleCalibrationError();
+      break;
+    case STATE_TECH_MENU:
+      handleTechMenu();
+      break;
+    case STATE_TECH_RAW_VALUES:
+      handleTechRawValues();
+      break;
+    case STATE_TECH_CHECK_SENSORS:
+      handleTechCheckSensors();
+      break;
+      case STATE_TECH_ACTIVATE_PUMP:
+        handleTechActivatePump();
+        break;
+    case STATE_TECH_SET_PUMP_TIMER:
+      handleTechSetPumpTimer();
+      break;
+    case STATE_TECH_RESTART_CONFIRM:
+      handleTechRestartConfirm();
+      break;
+  }
+
+  // Reseta os flags dos botões após terem sido processados no estado atual
+  resetButtonFlags();
+}
+
+// =====================================================================================================================
+// Funções de Leitura de Sensores e Botões
+// =====================================================================================================================
+
+/**
+ * @brief Lê o estado dos três botões e aplica um filtro de "debounce".
+ * Atualiza as variáveis globais 'btn...Pressed' para true se um clique for detectado.
+ */
+void readButtons() {
+  if ((millis() - lastDebounceTime) > BUTTON_DEBOUNCE_DELAY) {
+    int readingMenu = digitalRead(PIN_BTN_MENU);
+    if (readingMenu != lastBtnMenuState) {
+      lastDebounceTime = millis();
+      if (readingMenu == LOW) {
+        btnMenuPressed = true;
+        lastActivityTime = millis(); // Registra atividade do usuário
+      }
+    }
+    lastBtnMenuState = readingMenu;
+
+    int readingUp = digitalRead(PIN_BTN_UP);
+    if (readingUp != lastBtnUpState) {
+      lastDebounceTime = millis();
+      if (readingUp == LOW) {
+        btnUpPressed = true;
+        lastActivityTime = millis();
+      }
+    }
+    lastBtnUpState = readingUp;
+
+    int readingDown = digitalRead(PIN_BTN_DOWN);
+    if (readingDown != lastBtnDownState) {
+      lastDebounceTime = millis();
+      if (readingDown == LOW) {
+        btnDownPressed = true;
+        lastActivityTime = millis();
+      }
+    }
+    lastBtnDownState = readingDown;
+  }
+}
+
+/**
+ * @brief Reseta os flags de botão pressionado para false.
+ * Deve ser chamada no final do loop() para preparar para a próxima iteração.
+ */
+void resetButtonFlags() {
+  btnMenuPressed = false;
+  btnUpPressed = false;
+  btnDownPressed = false;
+}
+
+/**
+ * @brief Lê a temperatura e o valor de pH.
+ * A leitura do pH é feita a cada segundo para o valor instantâneo.
+ */
+void readSensors() {
+  // A leitura do pH é mais crítica, então a fazemos com mais frequência.
+  if (millis() - lastSampleTime >= SAMPLING_INTERVAL_MS) {
+    lastSampleTime = millis();
+
+    // Lê a temperatura (não precisa ser a cada segundo, mas é simples fazer aqui)
+    tempSensor.requestTemperatures();
+    float tempRead = tempSensor.getTempCByIndex(0);
+    // Validação simples da leitura de temperatura
+    if (tempRead != DEVICE_DISCONNECTED_C && tempRead > 0 && tempRead < 100) {
+      currentTemperature = tempRead;
+    }
+
+    // Lê a voltagem do sensor de pH
+    int16_t adc_raw = ads.readADC_SingleEnded(ADS_CHANNEL_PH);
+    float voltage = ads.computeVolts(adc_raw);
+
+    // Converte a voltagem para pH, compensando com a temperatura
+    currentPhInst = convertVoltageToPh(voltage, currentTemperature);
+
+    // Armazena a amostra para o cálculo da média, independentemente do estado atual.
+    // A lógica de controle agora é global.
+    if (sampleCount < NUM_SAMPLES) {
+      phSamples[sampleCount] = currentPhInst;
+      sampleCount++;
+    }
+  }
+}
+
+/**
+ * @brief Converte a voltagem lida do sensor para um valor de pH.
+ * @param voltage A voltagem lida do sensor de pH.
+ * @param temperature A temperatura atual da solução, para compensação.
+ * @return O valor de pH calculado.
+ */
+float convertVoltageToPh(float voltage, float temperature) {
+  // A conversão de voltagem para pH segue a equação de Nernst.
+  // pH = 7 - (V - V_offset) / (Slope * TempFactor)
+  // Onde V_offset é a voltagem em pH 7 e Slope é a sensibilidade do eletrodo.
+  // Estes valores são obtidos na calibragem.
+
+  // Fator de compensação de temperatura. O slope teórico muda com a temperatura.
+  float tempFactor = (273.15 + temperature) / (273.15 + 25.0);
+
+  // A fórmula correta é pH = 7 + (V_medido - V_pH7) / (slope * temp_factor)
+  // O slope da sonda de pH é negativo (aprox. -59mV/pH).
+  // Quando o pH é ácido (<7), a tensão medida (voltage) é maior que a tensão em pH7 (calibOffsetVoltage).
+  // Isso resulta em (voltage - calibOffsetVoltage) > 0.
+  // Dividir um positivo por um slope negativo resulta em um valor negativo, que é somado a 7,
+  // resultando em um pH < 7, o que está correto.
+  float phValue = 7.0 + (voltage - config.calibOffsetVoltage) / (config.calibSlope * tempFactor);
+
+  return phValue;
+}
+
+
+// =====================================================================================================================
+// Funções de Gerenciamento de Estado (Handlers)
+// =====================================================================================================================
+
+/**
+ * @brief Gerencia o estado de monitoramento principal.
+ */
+void handleMonitoring() {
+  // Lógica para evitar flickering: desenha o layout e atualiza os valores.
+  if (screenNeedsRedraw) {
+    drawMonitoringLayout();
+    lastActivityTime = millis(); // Reseta o timer de inatividade ao (re)entrar na tela
+  }
+  updateMonitoringValues();
+
+  // Agora que a tela foi redesenhada (se necessário), reseta a flag para evitar
+  // que o layout seja redesenhado a cada ciclo.
+  screenNeedsRedraw = false;
+
+  // A lógica de processamento de amostras e controle foi movida para o loop() principal
+  // para garantir que funcione globalmente, mesmo durante o screensaver.
+
+  // Verifica se o botão MENU foi pressionado para ir ao menu principal
+  if (btnMenuPressed) {
+    currentState = STATE_MAIN_MENU;
+    screenNeedsRedraw = true;
+    menuCursor = 0;
+    return; // Sai da função para evitar que o screensaver seja ativado na mesma iteração
+  }
+
+  // Verifica se a bomba está em cooldown
+  if (isPumpOnCooldown && (millis() - pumpCooldownStartTime >= PUMP_COOLDOWN_MS)) {
+    isPumpOnCooldown = false;
+  }
+
+  // Verifica o timeout para o screensaver
+  if (millis() - lastActivityTime > SCREENSAVER_TIMEOUT_MS) {
+      currentState = STATE_SCREENSAVER;
+      screenNeedsRedraw = true;
+  }
+}
+
+/**
+ * @brief Gerencia o estado do screensaver.
+ * Executa a animação e verifica se um botão foi pressionado para sair.
+ */
+void handleScreensaver() {
+    // Se qualquer botão for pressionado, saia do screensaver e volte para o monitoramento.
+    if (btnMenuPressed || btnUpPressed || btnDownPressed) {
+        currentState = STATE_MONITORING;
+        screenNeedsRedraw = true; // Força o redesenho completo da tela de monitoramento.
+        return;
+    }
+
+    // Se estamos entrando no modo screensaver, inicializa o jogo/animação.
+    if (screenNeedsRedraw) {
+        // Limpa a tela física e o buffer de tela anterior uma única vez.
+        lcd.clear();
+        for (int r = 0; r < LCD_ROWS; r++) {
+            for (int c = 0; c < LCD_COLUMNS; c++) {
+                // Inicializa o buffer de "tela" com um valor conhecido (espaço).
+                // Usa (byte)' ' para consistência com o tipo de dado do buffer.
+                prevLcdBuffer[r][c] = (byte)' ';
+            }
+        }
+        resetTetrisGrid(tetrisAnimationMode);
+
+        // A nova função 'buildScreenBufferFromGrid' irá popular o buffer com base na grade.
+        buildScreenBufferFromGrid();
+        // 'updateLcdFromBuffer' irá desenhar a tela inteira na primeira vez, pois
+        // prevLcdBuffer está cheio de espaços e lcdBuffer agora tem a grade.
+        updateLcdFromBuffer();
+
+        spawnNewPiece();
+        // A primeira peça será desenhada no primeiro passo de runTetrisStep.
+        screenNeedsRedraw = false;
+    }
+
+    // Executa um passo da animação
+    runTetrisStep();
+}
+
+// =====================================================================================================================
+// Funções do Screensaver (Animação de Blocos)
+// =====================================================================================================================
+
+/**
+ * @brief Reinicia a grade da animação.
+ * @param mode Se true, limpa a grade (modo de preenchimento). Se false, preenche a grade (modo de limpeza).
+ */
+void resetTetrisGrid(bool mode) {
+    for (int r = 0; r < LCD_ROWS; r++) {
+        for (int c = 0; c < LCD_COLUMNS; c++) {
+            tetrisGrid[r][c] = mode ? 0 : 1;
+        }
+    }
+}
+
+/**
+ * @brief Gera um novo bloco em uma posição aleatória no topo da tela.
+ */
+void spawnNewPiece() {
+    currentRow = 0; // Começa na primeira linha
+    currentCol = random(LCD_COLUMNS); // Em uma coluna aleatória
+}
+
+/**
+ * @brief Verifica se o bloco atual na posição (r, c) colide com a grade ou com o chão.
+ * @return true se houver colisão, false caso contrário.
+ */
+bool checkCollision(int r, int c) {
+    // Verifica colisão com o chão
+    if (r >= LCD_ROWS) {
+        return true;
+    }
+    // Verifica colisão com outros blocos já na grade
+    if (r >= 0 && c >= 0 && r < LCD_ROWS && c < LCD_COLUMNS && tetrisGrid[r][c] == (tetrisAnimationMode ? 1 : 0)) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * @brief "Trava" o bloco atual na grade.
+ */
+void lockPiece() {
+    if (currentRow >= 0 && currentRow < LCD_ROWS && currentCol >= 0 && currentCol < LCD_COLUMNS) {
+        tetrisGrid[currentRow][currentCol] = tetrisAnimationMode ? 1 : 0;
+    }
+}
+
+/**
+ * @brief (NOVA FUNÇÃO) Preenche o buffer de tela (lcdBuffer) com base no estado atual da grade (tetrisGrid).
+ * Usado para redesenhar a tela inteira quando o modo de animação muda ou ao iniciar o screensaver.
+ * Esta é uma operação "pesada" que deve ser chamada o mínimo possível.
+ */
+void buildScreenBufferFromGrid() {
+    for (int r = 0; r < LCD_ROWS; r++) {
+        for (int c = 0; c < LCD_COLUMNS; c++) {
+            if (tetrisGrid[r][c]) {
+                lcdBuffer[r][c] = 0; // Caractere customizado do bloco
+            } else {
+                lcdBuffer[r][c] = ' '; // Espaço vazio
+            }
+        }
+    }
+}
+
+
+/**
+ * @brief Compara o `lcdBuffer` com o `prevLcdBuffer` e atualiza apenas os caracteres que mudaram.
+ * Esta é a função chave para evitar o flickering. Como ela só escreve na tela o que mudou,
+ * a otimização real vem de modificar o `lcdBuffer` o mínimo possível a cada quadro.
+ */
+void updateLcdFromBuffer() {
+    for (int r = 0; r < LCD_ROWS; r++) {
+        for (int c = 0; c < LCD_COLUMNS; c++) {
+            // Se o caractere no buffer atual for diferente do que está na tela (no buffer anterior)
+            if (lcdBuffer[r][c] != prevLcdBuffer[r][c]) {
+                lcd.setCursor(c, r);
+                lcd.write(lcdBuffer[r][c]); // Escreve o novo byte
+                prevLcdBuffer[r][c] = lcdBuffer[r][c]; // Atualiza o buffer de "tela" para sincronizar
+            }
+        }
+    }
+}
+
+/**
+ * @brief (REESCRITA) Executa um passo da animação de blocos de forma otimizada.
+ * Esta função agora modifica apenas as células necessárias no buffer de tela, em vez de
+ * reconstruir o buffer inteiro a cada quadro.
+ */
+void runTetrisStep() {
+    if (millis() - tetrisLastFallTime > TETRIS_FALL_DELAY) {
+        tetrisLastFallTime = millis();
+
+        // 1. Apaga a peça da sua posição ATUAL no buffer de tela.
+        //    O que restaurar no lugar? O que quer que esteja na grade "fixa" (tetrisGrid) por baixo.
+        //    Isso garante que, ao mover, não deixemos um rastro de espaços em cima de blocos já travados.
+        if (currentRow >= 0 && currentRow < LCD_ROWS && currentCol >= 0 && currentCol < LCD_COLUMNS) {
+            lcdBuffer[currentRow][currentCol] = tetrisGrid[currentRow][currentCol] ? (byte)0 : (byte)' ';
+        }
+
+        // 2. Tenta mover o bloco para baixo e verifica colisão.
+        if (!checkCollision(currentRow + 1, currentCol)) {
+            currentRow++; // Move para a próxima linha se não houver colisão.
+        } else {
+            // Se colidiu (com o chão ou outra peça):
+            // a. Trava o bloco na grade lógica.
+            lockPiece();
+            // b. O buffer de tela já está correto na posição atual, pois o passo 1 restaurou o que
+            //    estava por baixo, e o lockPiece() agora faz com que a grade e o buffer coincidam.
+            //    Então, a peça "travada" já está visualmente no lugar certo.
+
+            // c. Verifica se a tela está cheia/vazia para trocar o modo de animação.
+            bool isScreenFull = true;
+            bool isScreenEmpty = true;
+            for(int r = 0; r < LCD_ROWS; r++) {
+                for(int c = 0; c < LCD_COLUMNS; c++) {
+                    if (tetrisGrid[r][c] == 0) isScreenFull = false;
+                    if (tetrisGrid[r][c] == 1) isScreenEmpty = false;
+                }
+            }
+
+            if ((tetrisAnimationMode && isScreenFull) || (!tetrisAnimationMode && isScreenEmpty)) {
+                tetrisAnimationMode = !tetrisAnimationMode; // Inverte o modo
+                delay(1000); // Pausa para efeito visual.
+                resetTetrisGrid(tetrisAnimationMode);
+                buildScreenBufferFromGrid(); // Reconstrói o buffer inteiro para a nova fase.
+            }
+
+            // d. Gera um novo bloco para o próximo ciclo.
+            spawnNewPiece();
+            // e. Se o novo bloco já colide ao ser gerado, a tela está bloqueada. Reseta.
+            if(checkCollision(currentRow, currentCol)){
+                resetTetrisGrid(tetrisAnimationMode);
+                buildScreenBufferFromGrid();
+            }
+        }
+
+        // 3. Desenha a peça na sua NOVA posição no buffer de tela.
+        //    (Seja a posição movida, ou a posição inicial da nova peça se a anterior travou).
+        if (currentRow >= 0 && currentRow < LCD_ROWS && currentCol >= 0 && currentCol < LCD_COLUMNS) {
+             lcdBuffer[currentRow][currentCol] = (tetrisAnimationMode ? (byte)0 : (byte)' ');
+        }
+
+        // 4. Atualiza o LCD. Esta chamada agora é muito mais "leve", pois na maioria das vezes
+        //    apenas 2 caracteres (a posição antiga e a nova da peça) terão mudado no buffer.
+        updateLcdFromBuffer();
+    }
+}
+
+/**
+ * @brief Gerencia o menu inicial exibido ao ligar.
+ */
+void handleInitialMenu() {
+    if (screenNeedsRedraw) {
+        displayInitialMenu();
+        screenNeedsRedraw = false;
+    }
+
+    if (btnUpPressed) {
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 2;
+        screenNeedsRedraw = true;
+    }
+    if (btnDownPressed) {
+        menuCursor = (menuCursor < 2) ? menuCursor + 1 : 0;
+        screenNeedsRedraw = true;
+    }
+    if (btnMenuPressed) {
+        switch (menuCursor) {
+            case 0: // Monitorar
+                currentState = STATE_MONITORING;
+                break;
+            case 1: // Calibrar Sonda
+                currentState = STATE_CALIBRATION_MENU;
+                menuCursor = 0;
+                break;
+            case 2: // Menu Técnico
+                currentState = STATE_TECH_MENU;
+                menuCursor = 0;
+                break;
+        }
+        screenNeedsRedraw = true;
+    }
+}
+
+/**
+ * @brief Gerencia o menu principal.
+ */
+void handleMainMenu() {
+  if (screenNeedsRedraw) {
+    displayMainMenu();
+    screenNeedsRedraw = false;
+  }
+
+  // Timeout de inatividade
+  if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+    currentState = STATE_MONITORING;
+    screenNeedsRedraw = true;
+    return;
+  }
+
+  if (btnUpPressed) {
+    menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3; // 4 opções (0-3)
+    screenNeedsRedraw = true;
+  }
+  if (btnDownPressed) {
+    menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0; // 4 opções (0-3)
+    screenNeedsRedraw = true;
+  }
+
+  if (btnMenuPressed) {
+    switch (menuCursor) {
+      case 0: // Definir pH Ideal
+        currentState = STATE_SET_PH_IDEAL;
+        tempPhIdeal = config.phIdeal; // Carrega o valor atual para edição
+        break;
+      case 1: // Calibrar Sonda
+        currentState = STATE_CALIBRATION_MENU;
+        menuCursor = 0;
+        break;
+      case 2: // Menu Técnico
+        currentState = STATE_TECH_MENU;
+        menuCursor = 0;
+        break;
+      case 3: // Voltar
+        currentState = STATE_MONITORING;
+        break;
+    }
+    screenNeedsRedraw = true;
+  }
+}
+
+/**
+ * @brief Gerencia a tela de definição do pH ideal.
+ */
+void handleSetPhIdeal() {
+  if (screenNeedsRedraw) {
+    displaySetPhIdeal();
+    screenNeedsRedraw = false;
+  }
+
+  // Timeout de inatividade
+  if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+    currentState = STATE_MONITORING; // Descarta alterações e volta
+    screenNeedsRedraw = true;
+    return;
+  }
+
+  if (btnUpPressed) {
+    tempPhIdeal += 0.1;
+    screenNeedsRedraw = true;
+  }
+  if (btnDownPressed) {
+    tempPhIdeal -= 0.1;
+    screenNeedsRedraw = true;
+  }
+  // Limita o valor entre 1.0 e 13.0
+  if (tempPhIdeal > 13.0) tempPhIdeal = 13.0;
+  if (tempPhIdeal < 1.0) tempPhIdeal = 1.0;
+
+  if (btnMenuPressed) {
+    config.phIdeal = tempPhIdeal;
+    saveConfigToEEPROM();
+    // Exibe mensagem de salvo
+    lcd.clear();
+    lcd.setCursor(0, 1);
+    lcd.print(F("  VALOR SALVO!  "));
+    delay(2000);
+    currentState = STATE_MONITORING;
+    screenNeedsRedraw = true;
+  }
+}
+
+/**
+ * @brief Gerencia o menu de seleção de tipo de calibragem.
+ */
+void handleCalibrationMenu() {
+    if (screenNeedsRedraw) {
+        displayCalibrationMenu();
+        screenNeedsRedraw = false;
+    }
+
+    if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+        currentState = STATE_MONITORING;
+        screenNeedsRedraw = true;
+        return;
+    }
+    if (btnUpPressed) {
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 2;
+        screenNeedsRedraw = true;
+    }
+    if (btnDownPressed) {
+        menuCursor = (menuCursor < 2) ? menuCursor + 1 : 0;
+        screenNeedsRedraw = true;
+    }
+    if (btnMenuPressed) {
+        switch (menuCursor) {
+            case 0: // 1 Ponto
+                currentState = STATE_CALIBRATION_1_POINT_SELECT;
+                menuCursor = 0;
+                break;
+            case 1: // 2 Pontos
+                currentState = STATE_CALIBRATION_2_POINTS_SELECT_1;
+                menuCursor = 0;
+                break;
+            case 2: // Voltar
+                currentState = STATE_MAIN_MENU;
+                menuCursor = 1; // Volta para a opção "Calibrar Sonda"
+                break;
+        }
+        screenNeedsRedraw = true;
+    }
+}
+
+/**
+ * @brief Gerencia a seleção da solução para calibragem de 1 ponto.
+ */
+void handleCalib1PointSelect() {
+    if (screenNeedsRedraw) {
+        displayCalibSelect(F("CALIBRAR 1 PONTO"), F("Selecione SOLUCAO:"), 0);
+        screenNeedsRedraw = false;
+    }
+
+    if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+        currentState = STATE_CALIBRATION_MENU;
+        screenNeedsRedraw = true;
+        menuCursor = 0;
+        return;
+    }
+    if (btnUpPressed) {
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3; // 4 opções (0-3)
+        screenNeedsRedraw = true;
+    }
+    if (btnDownPressed) {
+        menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0; // 4 opções (0-3)
+        screenNeedsRedraw = true;
+    }
+
+    if (btnMenuPressed) {
+        if (menuCursor == 3) { // Voltar
+            currentState = STATE_CALIBRATION_MENU;
+            menuCursor = 0;
+        } else {
+            float solutions[] = {4.01, 7.01, 10.01};
+            calibrationSolutionValue1 = solutions[menuCursor];
+            isTwoPointCalibration = false;
+            calibrationPoint = 1;
+            currentState = STATE_CALIBRATE_WAIT_FOR_POINT;
+        }
+        screenNeedsRedraw = true;
+    }
+}
+
+/**
+ * @brief Gerencia a seleção da primeira solução para calibragem de 2 pontos.
+ */
+void handleCalib2PointsSelect1() {
+    if (screenNeedsRedraw) {
+        displayCalibSelect(F("CALIBRAR 2 PONTOS"), F("Selecione PONTO 1:"), 0);
+        screenNeedsRedraw = false;
+    }
+
+    if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+        currentState = STATE_CALIBRATION_MENU;
+        screenNeedsRedraw = true;
+        menuCursor = 0;
+        return;
+    }
+    if (btnUpPressed) {
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3;
+        screenNeedsRedraw = true;
+    }
+    if (btnDownPressed) {
+        menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0;
+        screenNeedsRedraw = true;
+    }
+
+    if (btnMenuPressed) {
+        if (menuCursor == 3) { // Voltar
+            currentState = STATE_CALIBRATION_MENU;
+            menuCursor = 0;
+        } else {
+            float solutions[] = {4.01, 7.01, 10.01};
+            calibrationSolutionValue1 = solutions[menuCursor];
+            currentState = STATE_CALIBRATION_2_POINTS_SELECT_2;
+            menuCursor = 0; // Reseta cursor para a próxima tela
+        }
+        screenNeedsRedraw = true;
+    }
+}
+
+/**
+ * @brief Gerencia a seleção da segunda solução para calibragem de 2 pontos.
+ */
+void handleCalib2PointsSelect2() {
+    if (screenNeedsRedraw) {
+        displayCalibSelect(F("CALIBRAR 2 PONTOS"), F("Selecione PONTO 2:"), 1);
+        screenNeedsRedraw = false;
+    }
+
+     if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+        currentState = STATE_CALIBRATION_MENU;
+        screenNeedsRedraw = true;
+        menuCursor = 0;
+        return;
+    }
+    if (btnUpPressed) {
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 2;
+        screenNeedsRedraw = true;
+    }
+    if (btnDownPressed) {
+        menuCursor = (menuCursor < 2) ? menuCursor + 1 : 0;
+        screenNeedsRedraw = true;
+    }
+
+    if (btnMenuPressed) {
+        if (menuCursor == 2) { // Voltar
+            currentState = STATE_CALIBRATION_2_POINTS_SELECT_1;
+            menuCursor = 0;
+        } else {
+            // Lógica para pular a solução já escolhida
+            float solutions[] = {4.01, 7.01, 10.01};
+            int choiceIndex = 0;
+            for (int i = 0; i < 3; i++) {
+                if (abs(solutions[i] - calibrationSolutionValue1) > 0.1) {
+                    if (choiceIndex == menuCursor) {
+                        calibrationSolutionValue2 = solutions[i];
+                        break;
+                    }
+                    choiceIndex++;
+                }
+            }
+            isTwoPointCalibration = true;
+            calibrationPoint = 1;
+            currentState = STATE_CALIBRATE_WAIT_FOR_POINT;
+        }
+        screenNeedsRedraw = true;
+    }
+}
+
+
+/**
+ * @brief Novo handler: Aguarda o usuário pressionar MENU para iniciar a leitura.
+ */
+void handleCalibrateWaitForPoint() {
+    if (screenNeedsRedraw) {
+        float solutionValue = (calibrationPoint == 1) ? calibrationSolutionValue1 : calibrationSolutionValue2;
+        displayCalibInstruction(solutionValue);
+        screenNeedsRedraw = false;
+    }
+
+    if (btnMenuPressed) {
+        currentState = STATE_CALIBRATE_READING;
+        screenNeedsRedraw = true;
+    }
+}
+
+/**
+ * @brief Novo handler: Executa a leitura da calibração e decide o próximo passo.
+ */
+void handleCalibrateReading() {
+    // This state is different. It performs a long-running, blocking action that
+    // updates the display itself. It's only run once per state entry.
+    // No anti-flicker logic is needed here.
+    float voltageReading = performCalibrationReading();
+
+    if (voltageReading < 0) { // Indica erro de estabilização
+        currentState = STATE_CALIBRATION_ERROR;
+        screenNeedsRedraw = true;
+        return;
+    }
+
+    if (calibrationPoint == 1) {
+        tempVoltageReading1 = voltageReading;
+        if (isTwoPointCalibration) {
+            calibrationPoint = 2; // Prepara para o segundo ponto
+            currentState = STATE_CALIBRATE_WAIT_FOR_POINT;
+        } else {
+            // Calibração de 1 PONTO: Usa o slope teórico e ajusta o offset.
+            config.calibOffsetVoltage = tempVoltageReading1 + (config.calibSlope * (7.0 - calibrationSolutionValue1));
+            config.isCalibrated2Points = false;
+            saveConfigToEEPROM();
+            displaySuccessMessage("Calibragem OK!");
+            currentState = STATE_MONITORING;
+        }
+    } else { // calibrationPoint == 2
+        tempVoltageReading2 = voltageReading;
+
+        // Calcula o slope com base nos dois pontos.
+        // Evita divisão por zero ou por valores muito próximos.
+        if (abs(tempVoltageReading1 - tempVoltageReading2) > 0.01 && abs(calibrationSolutionValue1 - calibrationSolutionValue2) > 1) {
+            config.calibSlope = (tempVoltageReading1 - tempVoltageReading2) / (calibrationSolutionValue1 - calibrationSolutionValue2);
+            // Recalcula o offset a partir do primeiro ponto e do novo slope.
+            config.calibOffsetVoltage = tempVoltageReading1 + (config.calibSlope * (7.0 - calibrationSolutionValue1));
+            config.isCalibrated2Points = true;
+
+            saveConfigToEEPROM();
+            displaySuccessMessage("Calibragem OK!");
+            currentState = STATE_MONITORING;
+        } else {
+            currentState = STATE_CALIBRATION_ERROR; // Erro, pontos muito próximos
+        }
+    }
+    screenNeedsRedraw = true;
+}
+
+/**
+ * @brief Gerencia a tela de erro de calibragem.
+ */
+void handleCalibrationError() {
+    if (screenNeedsRedraw) {
+        displayCalibrationError();
+        screenNeedsRedraw = false;
+    }
+
+    if (btnUpPressed || btnDownPressed) {
+        menuCursor = !menuCursor; // Alterna entre 0 e 1
+        screenNeedsRedraw = true;
+    }
+    if (btnMenuPressed) {
+        if (menuCursor == 0) { // Tentar Novamente
+            currentState = STATE_CALIBRATION_MENU; // Volta para o início da calibragem
+            menuCursor = 0;
+        } else { // Voltar
+            currentState = STATE_MAIN_MENU;
+            menuCursor = 1;
+        }
+        screenNeedsRedraw = true;
+    }
+}
+
+/**
+ * @brief Gerencia o menu técnico.
+ */
+void handleTechMenu() {
+    if (screenNeedsRedraw) {
+        displayTechMenu();
+        screenNeedsRedraw = false;
+    }
+
+    if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+        currentState = STATE_MONITORING;
+        screenNeedsRedraw = true;
+        return;
+    }
+    if (btnUpPressed) {
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 5; // 6 opções (0-5)
+        screenNeedsRedraw = true;
+    }
+    if (btnDownPressed) {
+        menuCursor = (menuCursor < 5) ? menuCursor + 1 : 0; // 6 opções (0-5)
+        screenNeedsRedraw = true;
+    }
+
+    if (btnMenuPressed) {
+        switch (menuCursor) {
+            case 0: // Valores Brutos
+                currentState = STATE_TECH_RAW_VALUES;
+                break;
+            case 1: // Checar Sensores
+                currentState = STATE_TECH_CHECK_SENSORS;
+                break;
+            case 2: // Ativar Bomba
+                currentState = STATE_TECH_ACTIVATE_PUMP;
+                break;
+            case 3: // Timer Bomba
+                currentState = STATE_TECH_SET_PUMP_TIMER;
+                tempPumpDurationMs = config.pumpDurationMs; // Carrega o valor atual para edição
+                break;
+            case 4: // Reiniciar
+                currentState = STATE_TECH_RESTART_CONFIRM;
+                menuCursor = 1; // Padrão em "NÃO"
+                break;
+            case 5: // Voltar
+                currentState = STATE_MAIN_MENU;
+                menuCursor = 2; // Volta para a opção "Menu Tecnico" no menu anterior
+                break;
+        }
+        screenNeedsRedraw = true;
+    }
+}
+
+/**
+ * @brief Gerencia a tela de valores brutos.
+ */
+void drawTechRawValuesLayout() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("   VALORES BRUTOS   "));
+    lcd.setCursor(0, 1);
+    lcd.print(F("pH(V): "));
+    lcd.setCursor(0, 2);
+    lcd.print(F("Temp(C): "));
+    lcd.setCursor(0, 3);
+    lcd.print(F("MENU para Voltar"));
+}
+
+void updateTechRawValues() {
+    // Atualiza o valor de Tensão do pH
+    lcd.setCursor(7, 1);
+    lcd.print(ads.computeVolts(ads.readADC_SingleEnded(ADS_CHANNEL_PH)), 4);
+
+    // Atualiza o valor da Temperatura
+    lcd.setCursor(9, 2);
+    lcd.print(currentTemperature, 2);
+}
+
+void handleTechRawValues() {
+    if (screenNeedsRedraw) {
+        drawTechRawValuesLayout();
+        screenNeedsRedraw = false;
+    }
+    updateTechRawValues(); // Atualiza os valores continuamente
+
+    if (btnMenuPressed) {
+        currentState = STATE_TECH_MENU;
+        screenNeedsRedraw = true;
+        menuCursor = 0;
+    }
+}
+
+/**
+ * @brief Gerencia a tela de checagem de sensores (apenas espera o usuário voltar).
+ */
+void handleTechCheckSensors() {
+    // A tela é desenhada uma vez quando se entra no estado
+    if (screenNeedsRedraw) {
+        displaySensorCheckScreen();
+        checkSensors();
+        screenNeedsRedraw = false;
+    }
+
+    if (btnMenuPressed) {
+        currentState = STATE_TECH_MENU;
+        screenNeedsRedraw = true;
+        menuCursor = 1;
+    }
+}
+
+/**
+ * @brief Gerencia a tela de ativação manual da bomba.
+ */
+void handleTechActivatePump() {
+    if (screenNeedsRedraw) {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print(F("  ATIVACAO MANUAL   "));
+        lcd.setCursor(0, 1);
+        lcd.print(F("Mantenha UP para"));
+        lcd.setCursor(0, 2);
+        lcd.print(F("ligar a bomba."));
+        lcd.setCursor(0, 3);
+        lcd.print(F("MENU para Voltar"));
+        screenNeedsRedraw = false;
+    }
+
+    // Lógica de controle direto da bomba.
+    // O pino do botão UP usa INPUT_PULLUP (LOW quando pressionado).
+    // O MOSFET é ativado com sinal HIGH.
+    if (digitalRead(PIN_BTN_UP) == HIGH) {
+        digitalWrite(PIN_MOSFET_PUMP, HIGH); // Botão pressionado, LIGA a bomba.
+    } else {
+        digitalWrite(PIN_MOSFET_PUMP, LOW); // Botão solto, DESLIGA a bomba.
+    }
+
+    // Lógica para sair do menu
+    if (btnMenuPressed) {
+        digitalWrite(PIN_MOSFET_PUMP, LOW); // Garante que a bomba seja desligada (estado LOW) ao sair
+        currentState = STATE_TECH_MENU;
+        menuCursor = 2; // Volta para a opção "Ativar Bomba"
+        screenNeedsRedraw = true;
+    }
+}
+
+/**
+ * @brief Gerencia a tela de ajuste do timer da bomba.
+ */
+void handleTechSetPumpTimer() {
+  if (screenNeedsRedraw) {
+    displayTechSetPumpTimer();
+    screenNeedsRedraw = false;
+  }
+
+  // Timeout de inatividade
+  if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+    currentState = STATE_TECH_MENU; // Descarta alterações e volta
+    menuCursor = 3; // Volta para a opção "Timer Bomba"
+    screenNeedsRedraw = true;
+    return;
+  }
+
+  if (btnUpPressed) {
+    tempPumpDurationMs += 500; // Incrementa em 0.5s
+    screenNeedsRedraw = true;
+  }
+  if (btnDownPressed) {
+    tempPumpDurationMs -= 500; // Decrementa em 0.5s
+    screenNeedsRedraw = true;
+  }
+
+  // Limita o valor entre 0.5s (500ms) e 10.0s (10000ms)
+  // A verificação > 10000 previne o "wrap-around" de um unsigned long ao subtrair abaixo de 500.
+  if (tempPumpDurationMs < 500 || tempPumpDurationMs > 10000) {
+    tempPumpDurationMs = 500;
+  }
+
+  if (btnMenuPressed) {
+    config.pumpDurationMs = tempPumpDurationMs;
+    saveConfigToEEPROM();
+    displaySuccessMessage("  TIMER SALVO!  ");
+    currentState = STATE_TECH_MENU;
+    menuCursor = 3; // Volta para a opção "Timer Bomba"
+    screenNeedsRedraw = true;
+  }
+}
+
+/**
+ * @brief Gerencia a confirmação de reinício do sistema.
+ */
+void handleTechRestartConfirm() {
+    if (screenNeedsRedraw) {
+        displayRestartConfirm();
+        screenNeedsRedraw = false;
+    }
+
+    if (btnUpPressed || btnDownPressed) {
+        menuCursor = !menuCursor;
+        screenNeedsRedraw = true;
+    }
+
+    if (btnMenuPressed) {
+        if (menuCursor == 0) { // SIM
+            lcd.clear();
+            lcd.setCursor(0, 1);
+            lcd.print(F("  REINICIANDO...  "));
+            delay(2000);
+            // Força um reset via watchdog. O watchdog deve estar habilitado.
+            while (true);
+        } else { // NÃO
+            currentState = STATE_TECH_MENU;
+            screenNeedsRedraw = true;
+            menuCursor = 4; // Corrigido para apontar para "Reiniciar"
+        }
+    }
+}
+
+
+// =====================================================================================================================
+// Funções de Lógica de Controle
+// =====================================================================================================================
+
+/**
+ * @brief Processa as amostras de pH coletadas, calcula a média e armazena no histórico.
+ */
+void processPhSamples() {
+  // Ordena as amostras para facilitar o descarte dos extremos
+  sort(phSamples, NUM_SAMPLES);
+
+  float sum = 0;
+  // Soma os valores centrais, ignorando os extremos
+  for (int i = NUM_SAMPLES_TO_DISCARD; i < NUM_SAMPLES - NUM_SAMPLES_TO_DISCARD; i++) {
+    sum += phSamples[i];
+  }
+
+  int numSamplesForAvg = NUM_SAMPLES - (2 * NUM_SAMPLES_TO_DISCARD);
+  currentPhAvg = sum / numSamplesForAvg;
+
+  // Armazena a nova média no histórico circular
+  stablePhHistory[stablePhHistoryIndex] = currentPhAvg;
+  stablePhHistoryIndex = (stablePhHistoryIndex + 1) % 3;
+}
+
+/**
+ * @brief Verifica o pH médio e decide se alguma ação de controle é necessária.
+ */
+void checkPhAndControl() {
+  // Verifica se as últimas 3 médias estão estáveis
+  float maxDiff = 0;
+  float diff1 = abs(stablePhHistory[0] - stablePhHistory[1]);
+  float diff2 = abs(stablePhHistory[1] - stablePhHistory[2]);
+  float diff3 = abs(stablePhHistory[0] - stablePhHistory[2]);
+  maxDiff = max(diff1, max(diff2, diff3));
+
+  if (maxDiff <= PH_STABILITY_THRESHOLD) {
+    // As leituras são estáveis, podemos tomar uma decisão
+    if (currentPhAvg > config.phIdeal + PH_CONTROL_THRESHOLD) {
+      // pH está alto
+      currentPhStatus = PH_HIGH;
+      digitalWrite(PIN_LED_LOW_PH, LOW); // Garante que o LED de pH baixo esteja desligado
+      if (!isPumpOnCooldown) {
+        activatePump();
+      }
+    } else if (currentPhAvg < config.phIdeal - PH_CONTROL_THRESHOLD) {
+      // pH está baixo
+      currentPhStatus = PH_LOW;
+      digitalWrite(PIN_LED_LOW_PH, HIGH);
+    } else {
+      // pH está na faixa ideal
+      currentPhStatus = PH_NORMAL;
+      digitalWrite(PIN_LED_LOW_PH, LOW);
+    }
+  }
+}
+
+/**
+ * @brief Ativa a bomba de pH Down por um período definido.
+ */
+void activatePump() {
+  // Se a bomba for ativada enquanto o protetor de tela estiver ativo,
+  // força a saída do protetor de tela para a tela de monitoramento.
+  // Isso garante que o usuário seja notificado da ação de correção.
+  if (currentState == STATE_SCREENSAVER) {
+    currentState = STATE_MONITORING;
+  }
+
+  displayPumpActionScreen(true);
+  digitalWrite(PIN_MOSFET_PUMP, HIGH); // LIGA a bomba (ativo em HIGH)
+  // Usa o valor de duração da bomba que foi configurado pelo usuário e salvo na EEPROM.
+  delay(config.pumpDurationMs); // Neste caso, um delay é aceitável pois é uma ação curta e crítica
+  digitalWrite(PIN_MOSFET_PUMP, LOW); // DESLIGA a bomba
+  displayPumpActionScreen(false);
+
+  isPumpOnCooldown = true;
+  pumpCooldownStartTime = millis();
+
+  // Reseta o histórico de pH para evitar ações repetidas com dados antigos
+  for(int i=0; i<3; i++) stablePhHistory[i] = config.phIdeal;
+
+  // Força o redesenho da tela de monitoramento para limpar a mensagem da bomba
+  screenNeedsRedraw = true;
+}
+
+
+// =====================================================================================================================
+// Funções de Calibragem
+// =====================================================================================================================
+
+/**
+ * @brief Realiza o processo de leitura para a calibragem.
+ * @return A voltagem média estável, ou -1.0 em caso de erro.
+ */
+float performCalibrationReading() {
+    float lastAvg = 0, currentAvg = 0;
+    for (int attempt = 0; attempt < CALIBRATION_MAX_ATTEMPTS; attempt++) {
+        lcd.clear();
+        lcd.setCursor(0, 1);
+        lcd.print(F("Lendo... Tentativa "));
+        lcd.print(attempt + 1);
+
+        float samples[NUM_SAMPLES];
+        for (int i = 0; i < NUM_SAMPLES; i++) {
+            samples[i] = ads.computeVolts(ads.readADC_SingleEnded(ADS_CHANNEL_PH));
+            delay(SAMPLING_INTERVAL_MS);
+            wdt_reset();
+        }
+        sort(samples, NUM_SAMPLES);
+        float sum = 0;
+        for (int i = NUM_SAMPLES_TO_DISCARD; i < NUM_SAMPLES - NUM_SAMPLES_TO_DISCARD; i++) {
+            sum += samples[i];
+        }
+        currentAvg = sum / (NUM_SAMPLES - 2 * NUM_SAMPLES_TO_DISCARD);
+
+        if (attempt > 0 && abs(currentAvg - lastAvg) <= 0.001) { // 1mV de estabilidade
+            return currentAvg; // Sucesso
+        }
+        lastAvg = currentAvg;
+    }
+    return -1.0; // Falha em estabilizar
+}
+
+// =====================================================================================================================
+// Funções de Exibição na Tela (Display)
+// =====================================================================================================================
+
+void displayStartupMessage() {
+  lcd.clear();
+  lcd.setCursor(0, 1);
+  lcd.print(F(" Controlador de pH"));
+  lcd.setCursor(0, 2);
+  lcd.print(F("  Inicializando..."));
+}
+
+/**
+ * @brief Desenha o layout estático da tela de monitoramento. Chamada apenas uma vez.
+ */
+void drawMonitoringLayout() {
+  lcd.clear();
+  // A linha de título (linha 0) será gerenciada por updateMonitoringValues()
+
+  lcd.setCursor(0, 1);
+  lcd.print(F("PH ATUAL: "));
+
+  lcd.setCursor(0, 2);
+  lcd.print(F("PH INST:  "));
+
+  lcd.setCursor(0, 3);
+  lcd.print(F("T:"));
+  lcd.setCursor(6, 3);
+  lcd.print((char)223);
+  lcd.print(F("C  Ideal:"));
+}
+
+/**
+ * @brief Atualiza apenas os valores dinâmicos na tela de monitoramento, sem limpar.
+ */
+void updateMonitoringValues() {
+  static int spinnerPos = 0;
+  const char spinner[] = "|/-\\";
+  static PhStatus lastPhStatus = PH_NORMAL; // Para rastrear a mudança de estado
+
+  // A tela precisa ser redesenhada se o estado do pH mudou ou se voltamos de outro menu.
+  if (screenNeedsRedraw || currentPhStatus != lastPhStatus) {
+    lcd.setCursor(0, 0);
+    switch (currentPhStatus) {
+      case PH_LOW:
+        // Mensagem para pH baixo, com espaço inicial e preenchimento para limpar a linha.
+        lcd.print(F(" PH ATUAL < IDEAL   "));
+        break;
+      case PH_HIGH:
+        // Mensagem para pH alto (bomba trabalhando), com espaço inicial e preenchimento.
+        lcd.print(F(" AJUSTANDO PH       "));
+        break;
+      case PH_NORMAL:
+      default:
+        // Mensagem padrão, com espaço inicial e preenchimento.
+        lcd.print(F(" MONITORANDO        "));
+        break;
+    }
+  }
+
+  // Anima o spinner em uma posição fixa no final da linha para consistência visual.
+  lcd.setCursor(19, 0);
+  lcd.print(spinner[spinnerPos]);
+  spinnerPos = (spinnerPos + 1) % 4;
+
+  lastPhStatus = currentPhStatus; // Salva o estado atual para a próxima verificação
+
+  // Atualiza a média de pH
+  lcd.setCursor(10, 1);
+  lcd.print(currentPhAvg, 2);
+  lcd.print(F("   "));
+
+  // Atualiza o pH instantâneo
+  lcd.setCursor(10, 2);
+  lcd.print(currentPhInst, 2);
+  lcd.print(F("   "));
+
+  // Atualiza a Temperatura
+  lcd.setCursor(2, 3);
+  lcd.print(currentTemperature, 1);
+  lcd.print(" ");
+
+  // Atualiza o pH Ideal
+  lcd.setCursor(17, 3);
+  lcd.print(config.phIdeal, 1);
+  lcd.print(" ");
+}
+
+void displayInitialMenu() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("    MENU INICIAL    "));
+    const char* options[] = {"Monitorar", "Calibrar Sonda", "Menu Tecnico"};
+    for (int i = 0; i < 3; i++) {
+        lcd.setCursor(1, i + 1);
+        lcd.print(menuCursor == i ? ">" : " ");
+        lcd.print(options[i]);
+    }
+}
+
+void displayMainMenu() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("   MENU PRINCIPAL   "));
+    const char* options[] = {"Definir PH Ideal", "Calibrar Sonda", "Menu Tecnico", "Voltar"};
+    const int numOptions = 4;
+
+    // Lógica de rolagem para exibir 3 itens em uma tela com 1 linha de título
+    int displayOffset = 0;
+    if (menuCursor > 2) { // O cursor está no último item
+        displayOffset = menuCursor - 2; // Desloca a janela de visualização
+    }
+
+    for (int i = 0; i < 3; i++) { // Exibe até 3 itens
+        int optionIndex = i + displayOffset;
+        if (optionIndex < numOptions) {
+            lcd.setCursor(1, i + 1);
+            lcd.print(menuCursor == optionIndex ? ">" : " ");
+            lcd.print(options[optionIndex]);
+        }
+    }
+}
+
+void displaySetPhIdeal() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("  DEFINIR PH IDEAL  "));
+  lcd.setCursor(0, 2);
+  lcd.print(F("   PH Ideal: "));
+  lcd.print(tempPhIdeal, 1);
+  lcd.setCursor(0, 3);
+  lcd.print(F("Press. MENU p/salvar"));
+}
+
+void displayCalibrationMenu() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("  CALIBRAR SONDA  "));
+    const char* options[] = {"1 Ponto", "2 Pontos", "Voltar"};
+    for (int i = 0; i < 3; i++) {
+        lcd.setCursor(1, i + 1);
+        lcd.print(menuCursor == i ? ">" : " ");
+        lcd.print(options[i]);
+    }
+}
+
+void displayCalibSelect(const __FlashStringHelper* title, const __FlashStringHelper* subtitle, int pointNum) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(title);
+    lcd.setCursor(0, 1);
+    lcd.print(subtitle);
+
+    // Esta tela tem 2 linhas para opções (linhas 2 e 3)
+    const int numVisibleOptions = 2;
+
+    const char* options[4]; // Máximo de 4 opções
+    int numOptions;
+
+    if (pointNum == 0) { // Selecionando Ponto 1 (ou para calibração de 1 ponto)
+        options[0] = "Solucao 4.01";
+        options[1] = "Solucao 7.01";
+        options[2] = "Solucao 10.01";
+        options[3] = "Voltar";
+        numOptions = 4;
+    } else { // Selecionando Ponto 2
+        numOptions = 0;
+        float allSolutions[] = {4.01, 7.01, 10.01};
+        const char* allOptions[] = {"Solucao 4.01", "Solucao 7.01", "Solucao 10.01"};
+        for(int i=0; i<3; i++){
+            if(abs(allSolutions[i] - calibrationSolutionValue1) > 0.1){
+                options[numOptions++] = allOptions[i];
+            }
+        }
+        options[numOptions++] = "Voltar";
+    }
+
+    // Lógica de rolagem para exibir 2 itens
+    int displayOffset = 0;
+    if (menuCursor >= numVisibleOptions) {
+        displayOffset = menuCursor - (numVisibleOptions - 1);
+    }
+
+    for (int i = 0; i < numVisibleOptions; i++) {
+        int optionIndex = i + displayOffset;
+        lcd.setCursor(0, i + 2);
+        lcd.print("                    "); // Limpa a linha para evitar artefatos
+        if (optionIndex < numOptions) {
+            lcd.setCursor(1, i + 2); // Imprime nas linhas 2 e 3
+            lcd.print(menuCursor == optionIndex ? ">" : " ");
+            lcd.print(options[optionIndex]);
+        }
+    }
+}
+
+void displayCalibInstruction(float solution) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("Insira a sonda na"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("solucao de pH "));
+    lcd.print(solution, 2);
+    lcd.setCursor(0, 3);
+    lcd.print(F("Press. MENU quando"));
+}
+
+void displayCalibrationError() {
+    lcd.clear();
+    lcd.setCursor(0, 1);
+    lcd.print(F(" ERRO DE CALIBRAGEM "));
+    lcd.setCursor(1, 2);
+    lcd.print(menuCursor == 0 ? ">" : " ");
+    lcd.print("Tentar Novamente");
+    lcd.setCursor(1, 3);
+    lcd.print(menuCursor == 1 ? ">" : " ");
+    lcd.print("Voltar");
+}
+
+void displayTechMenu() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("    MENU TECNICO    "));
+    const char* options[] = {"Valores Brutos", "Checar Sensores", "Ativar Bomba", "Timer Bomba", "Reiniciar", "Voltar"};
+    const int numOptions = 6;
+
+    // Lógica de rolagem para exibir 3 itens em uma tela com 1 linha de título
+    int displayOffset = 0;
+    if (menuCursor > 2) {
+        displayOffset = menuCursor - 2;
+    }
+
+    for (int i = 0; i < 3; i++) {
+        int optionIndex = i + displayOffset;
+        if (optionIndex < numOptions) {
+            lcd.setCursor(1, i + 1);
+            lcd.print(menuCursor == optionIndex ? ">" : " ");
+            lcd.print(options[optionIndex]);
+        }
+    }
+}
+
+void displaySensorCheckScreen() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("  CHECANDO SENSORES "));
+    lcd.setCursor(0, 2);
+    lcd.print(F("      Aguarde...    "));
+}
+
+void displayRestartConfirm() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F(" REINICIAR SISTEMA? "));
+    lcd.setCursor(5, 2);
+    lcd.print(menuCursor == 0 ? ">SIM" : " SIM");
+    lcd.setCursor(12, 2);
+    lcd.print(menuCursor == 1 ? ">NAO" : " NAO");
+}
+
+void displayTechSetPumpTimer() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F(" AJUSTAR TIMER BOMBA"));
+  lcd.setCursor(0, 2);
+  // Exibe o valor em segundos, dividindo os milissegundos por 1000.
+  lcd.print(F("  Tempo: "));
+  lcd.print(tempPumpDurationMs / 1000.0, 1);
+  lcd.print(F("s"));
+  lcd.setCursor(0, 3);
+  lcd.print(F("Press. MENU p/salvar"));
+}
+
+void displayPumpActionScreen(bool isStarting) {
+    lcd.clear();
+    lcd.setCursor(0, 1);
+    if (isStarting) {
+        lcd.print(F("   AJUSTANDO PH...  "));
+        // Simula uma barra de progresso
+        lcd.setCursor(0, 2);
+        for(int i=0; i<LCD_COLUMNS; i++){
+          lcd.print((char)255); // Caractere de bloco
+          // A barra de progresso deve refletir a duração real da bomba, que está em config.pumpDurationMs.
+          delay(config.pumpDurationMs / LCD_COLUMNS);
+        }
+    } else {
+        lcd.print(F("  AJUSTE COMPLETO!  "));
+        delay(2000); // Mostra a mensagem por 2 segundos
+    }
+}
+
+void displaySuccessMessage(const char* message) {
+    lcd.clear();
+    lcd.setCursor(0, 1);
+    lcd.print(message);
+    delay(2000);
+}
+
+
+// =====================================================================================================================
+// Funções Utilitárias
+// =====================================================================================================================
+
+/**
+ * @brief Salva a estrutura de configuração na EEPROM.
+ */
+void saveConfigToEEPROM() {
+  EEPROM.put(EEPROM_ADDR_MAGIC, EEPROM_MAGIC_VALUE);
+  EEPROM.put(EEPROM_ADDR_CONFIG, config);
+}
+
+/**
+ * @brief Carrega a configuração da EEPROM ou define valores padrão.
+ */
+void loadConfigFromEEPROM() {
+  int magic;
+  EEPROM.get(EEPROM_ADDR_MAGIC, magic);
+  // Verifica o "número mágico" para ver se a EEPROM já foi inicializada.
+  if (magic == EEPROM_MAGIC_VALUE) {
+    // A EEPROM contém dados válidos, carrega-os
+    EEPROM.get(EEPROM_ADDR_CONFIG, config);
+    // Verificação de segurança: se o pumpDuration não foi inicializado (comum ao atualizar de uma versão antiga),
+    // ele pode ter um valor lixo. Definimos um padrão se for o caso.
+    // Um valor muito grande ou zero seria um bom indicador.
+    if (config.pumpDurationMs == 0 || config.pumpDurationMs > 60000) { // Maior que 1 minuto é irreal
+        config.pumpDurationMs = PUMP_DURATION_MS_DEFAULT;
+    }
+  } else {
+    // EEPROM não inicializada ou dados corrompidos, usa valores padrão
+    config.phIdeal = PH_IDEAL_DEFAULT;
+    config.calibOffsetVoltage = 0.0; // Tensão em pH 7.0
+    // Slope teórico em mV/pH a 25C. ADS1115 retorna V, então dividimos por 1000.
+    config.calibSlope = -0.05916;
+    config.isCalibrated2Points = false;
+    config.pumpDurationMs = PUMP_DURATION_MS_DEFAULT; // Define o padrão para o novo campo
+    saveConfigToEEPROM(); // Salva os padrões para a próxima inicialização
+  }
+}
+
+/**
+ * @brief Função simples para ordenar um array de floats (Bubble Sort).
+ */
+void sort(float a[], int size) {
+  for (int i = 0; i < (size - 1); i++) {
+    for (int o = 0; o < (size - (i + 1)); o++) {
+      if (a[o] > a[o + 1]) {
+        float t = a[o];
+        a[o] = a[o + 1];
+        a[o + 1] = t;
+      }
+    }
+  }
+}
+
+/**
+ * @brief Verifica a conexão com os sensores e exibe o status.
+ */
+void checkSensors() {
+    delay(1500); // Dá tempo para o usuário ler a mensagem "Aguarde"
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F(" STATUS DOS SENSORES"));
+
+    // Checa LCD (se chegamos aqui, o LCD está OK)
+    lcd.setCursor(0, 1);
+    lcd.print(F("LCD I2C: OK"));
+
+    // Checa ADS1115
+    Wire.beginTransmission(ADS1115_ADDRESS);
+    byte error = Wire.endTransmission();
+    lcd.setCursor(0, 2);
+    lcd.print(F("ADS1115: "));
+    lcd.print(error == 0 ? "OK" : "FALHA");
+
+    // Checa DS18B20
+    lcd.setCursor(0, 3);
+    lcd.print(F("DS18B20: "));
+    tempSensor.requestTemperatures();
+    lcd.print(tempSensor.getTempCByIndex(0) != DEVICE_DISCONNECTED_C ? "OK" : "FALHA");
+
+    // Deixa o usuário pressionar MENU para voltar
+    lcd.setCursor(0,4);
+    lcd.print(F("MENU para Voltar"));
+}
