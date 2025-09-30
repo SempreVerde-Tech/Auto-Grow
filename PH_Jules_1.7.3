@@ -1245,7 +1245,7 @@ void handleTechSetPumpTimer() {
   if (btnMenuPressed) {
     config.pumpDurationMs = tempPumpDurationMs;
     saveConfigToEEPROM();
-    displaySuccessMessage(F("  TIMER SALVO!  "));
+    displaySuccessMessage("  TIMER SALVO!  ");
     currentState = STATE_TECH_MENU;
     menuCursor = 3; // Volta para a opção "Timer Bomba"
     screenNeedsRedraw = true;
