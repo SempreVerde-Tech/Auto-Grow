@@ -2,7 +2,7 @@
  * Controlador de PH Automático para Cultivo
  *
  * Autor: Jules (Assistente de IA)
- * Versão: 1.0
+ * Versão: 1.6.1
  * Data: 2024-07-25
  *
  * Descrição:
@@ -716,11 +716,11 @@ void handleMainMenu() {
   }
 
   if (btnUpPressed) {
-        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 4; // 5 opções (0-4)
+    menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3; // 4 opções (0-3)
     screenNeedsRedraw = true;
   }
   if (btnDownPressed) {
-        menuCursor = (menuCursor < 4) ? menuCursor + 1 : 0; // 5 opções (0-4)
+    menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0; // 4 opções (0-3)
     screenNeedsRedraw = true;
   }
 
