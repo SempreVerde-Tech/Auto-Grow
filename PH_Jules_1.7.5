@@ -2,7 +2,7 @@
  * Controlador de PH Automático para Cultivo
  *
  * Autor: Jules (Assistente de IA)
- * Versão: 1.7.5
+ * Versão: 1.7.0
  * Data: 2025-09-30
  *
  * Descrição:
@@ -170,13 +170,56 @@ unsigned long tetrisLastFallTime = 0;
 bool tetrisAnimationMode = true;
 const int TETRIS_FALL_DELAY = 200;
 byte blockChar[8] = {B11111, B11111, B11111, B11111, B11111, B11111, B11111, B11111};
-byte lcdBuffer[LCD_ROWS][LCD_COLUMNS];
-byte prevLcdBuffer[LCD_ROWS][LCD_COLUMNS];
 
 // =====================================================================================================================
 // Declarações Antecipadas de Funções (Forward Declarations)
 // =====================================================================================================================
+void displayStartupMessage();
 void displaySuccessMessage(const char* message);
+void drawMonitoringLayout();
+void updateMonitoringValues();
+void handleInitialMenu();
+void handleMonitoring();
+void handlePumping();
+void handleScreensaver();
+void handleMainMenu();
+void handleSetPhIdeal();
+void handleCalibrationMenu();
+void handleCalib1PointSelect();
+void handleCalib2PointsSelect1();
+void handleCalib2PointsSelect2();
+void handleCalibrateWaitForPoint();
+void handleCalibrateReading();
+void handleCalibrationError();
+void handleTechMenu();
+void handleTechRawValues();
+void handleTechCheckSensors();
+void handleTechActivatePump();
+void handleTechSetPumpTimer();
+void handleTechRestartConfirm();
+void checkPhAndControl();
+void activatePump();
+void displayInitialMenu();
+void displayMainMenu();
+void displaySetPhIdeal();
+void displayCalibrationMenu();
+void displayCalibSelect(const __FlashStringHelper* title, const __FlashStringHelper* subtitle, int pointNum);
+void displayCalibInstruction(float solution);
+void displayCalibrationError();
+void displayTechMenu();
+void drawTechRawValuesLayout();
+void updateTechRawValues();
+void displaySensorCheckScreen();
+void checkSensors();
+void displayRestartConfirm();
+void displayTechSetPumpTimer();
+float performCalibrationReading();
+void sort(float a[], int size);
+void resetTetrisGrid(bool mode);
+void spawnNewPiece();
+bool checkCollision(int r, int c);
+void redrawFullGrid();
+void runTetrisStep();
 
 // =====================================================================================================================
 // Função setup()
@@ -221,7 +264,7 @@ void loop() {
   readButtons();
   readSensors();
 
-  if (sampleCount >= NUM_SAMPLES) {
+  if (currentState != STATE_PUMPING && sampleCount >= NUM_SAMPLES) {
     processPhSamples();
     checkPhAndControl();
     sampleCount = 0;
@@ -344,12 +387,12 @@ void handleMonitoring() {
 }
 
 void handlePumping() {
-  updateMonitoringValues(); // Continua atualizando a tela
+  updateMonitoringValues();
   if (millis() - pumpStartTime >= config.pumpDurationMs) {
-    digitalWrite(PIN_MOSFET_PUMP, LOW); // Desliga a bomba
-    for(int i=0; i<3; i++) stablePhHistory[i] = config.phIdeal; // Reseta histórico para evitar re-acionamento
+    digitalWrite(PIN_MOSFET_PUMP, LOW);
+    for(int i=0; i<3; i++) stablePhHistory[i] = config.phIdeal;
     currentState = STATE_MONITORING;
-    currentPhStatus = PH_HIGH; // Volta ao status de pH alto (aguardando cooldown)
+    currentPhStatus = PH_HIGH;
     screenNeedsRedraw = true;
   }
 }
@@ -361,122 +404,442 @@ void handleScreensaver() {
         return;
     }
     if (screenNeedsRedraw) {
-        lcd.clear();
-        for (int r = 0; r < LCD_ROWS; r++) {
-            for (int c = 0; c < LCD_COLUMNS; c++) {
-                prevLcdBuffer[r][c] = (byte)' ';
-            }
-        }
         resetTetrisGrid(tetrisAnimationMode);
-        buildScreenBufferFromGrid();
-        updateLcdFromBuffer();
+        redrawFullGrid();
         spawnNewPiece();
         screenNeedsRedraw = false;
     }
     runTetrisStep();
 }
 
-// ... (O restante das funções de menu handle... e display... permanecem as mesmas)
-// ... (Vou omiti-las por brevidade, mas elas estão no arquivo final)
-
-// =====================================================================================================================
-// Funções do Screensaver (Animação de Blocos) - CORRIGIDO
-// =====================================================================================================================
-
-void resetTetrisGrid(bool mode) {
-    for (int r = 0; r < LCD_ROWS; r++) {
-        for (int c = 0; c < LCD_COLUMNS; c++) {
-            tetrisGrid[r][c] = mode ? 0 : 1;
+void handleInitialMenu() {
+    if (screenNeedsRedraw) {
+        displayInitialMenu();
+        screenNeedsRedraw = false;
+    }
+    if (btnUpPressed) {
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 2;
+        screenNeedsRedraw = true;
+    }
+    if (btnDownPressed) {
+        menuCursor = (menuCursor < 2) ? menuCursor + 1 : 0;
+        screenNeedsRedraw = true;
+    }
+    if (btnMenuPressed) {
+        switch (menuCursor) {
+            case 0: currentState = STATE_MONITORING; break;
+            case 1: currentState = STATE_CALIBRATION_MENU; menuCursor = 0; break;
+            case 2: currentState = STATE_TECH_MENU; menuCursor = 0; break;
         }
+        screenNeedsRedraw = true;
     }
 }
 
-void spawnNewPiece() {
-    currentRow = 0;
-    currentCol = random(LCD_COLUMNS);
+void handleMainMenu() {
+  if (screenNeedsRedraw) {
+    displayMainMenu();
+    screenNeedsRedraw = false;
+  }
+  if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+    currentState = STATE_MONITORING;
+    screenNeedsRedraw = true;
+    return;
+  }
+  if (btnUpPressed) {
+    menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3;
+    screenNeedsRedraw = true;
+  }
+  if (btnDownPressed) {
+    menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0;
+    screenNeedsRedraw = true;
+  }
+  if (btnMenuPressed) {
+    switch (menuCursor) {
+      case 0: currentState = STATE_SET_PH_IDEAL; tempPhIdeal = config.phIdeal; break;
+      case 1: currentState = STATE_CALIBRATION_MENU; menuCursor = 0; break;
+      case 2: currentState = STATE_TECH_MENU; menuCursor = 0; break;
+      case 3: currentState = STATE_MONITORING; break;
+    }
+    screenNeedsRedraw = true;
+  }
 }
 
-bool checkCollision(int r, int c) {
-    if (r >= LCD_ROWS) {
-        return true;
-    }
-    if (r >= 0 && c >= 0 && r < LCD_ROWS && c < LCD_COLUMNS && tetrisGrid[r][c] == (tetrisAnimationMode ? 1 : 0)) {
-        return true;
-    }
-    return false;
+void handleSetPhIdeal() {
+  if (screenNeedsRedraw) {
+    displaySetPhIdeal();
+    screenNeedsRedraw = false;
+  }
+  if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+    currentState = STATE_MONITORING;
+    screenNeedsRedraw = true;
+    return;
+  }
+  if (btnUpPressed) {
+    tempPhIdeal += 0.1;
+    screenNeedsRedraw = true;
+  }
+  if (btnDownPressed) {
+    tempPhIdeal -= 0.1;
+    screenNeedsRedraw = true;
+  }
+  if (tempPhIdeal > 13.0) tempPhIdeal = 13.0;
+  if (tempPhIdeal < 1.0) tempPhIdeal = 1.0;
+  if (btnMenuPressed) {
+    config.phIdeal = tempPhIdeal;
+    saveConfigToEEPROM();
+    displaySuccessMessage("  VALOR SALVO!  ");
+    currentState = STATE_MONITORING;
+    screenNeedsRedraw = true;
+  }
 }
 
-void lockPiece() {
-    if (currentRow >= 0 && currentRow < LCD_ROWS && currentCol >= 0 && currentCol < LCD_COLUMNS) {
-        tetrisGrid[currentRow][currentCol] = tetrisAnimationMode ? 1 : 0;
-        // CORREÇÃO: Fixa o bloco no buffer visual também, para que ele não desapareça.
-        lcdBuffer[currentRow][currentCol] = tetrisAnimationMode ? (byte)0 : (byte)' ';
+void handleCalibrationMenu() {
+    if (screenNeedsRedraw) {
+        displayCalibrationMenu();
+        screenNeedsRedraw = false;
     }
-}
-
-void buildScreenBufferFromGrid() {
-    for (int r = 0; r < LCD_ROWS; r++) {
-        for (int c = 0; c < LCD_COLUMNS; c++) {
-            if (tetrisGrid[r][c]) {
-                lcdBuffer[r][c] = 0;
-            } else {
-                lcdBuffer[r][c] = ' ';
-            }
+    if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+        currentState = STATE_MONITORING;
+        screenNeedsRedraw = true;
+        return;
+    }
+    if (btnUpPressed) {
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 2;
+        screenNeedsRedraw = true;
+    }
+    if (btnDownPressed) {
+        menuCursor = (menuCursor < 2) ? menuCursor + 1 : 0;
+        screenNeedsRedraw = true;
+    }
+    if (btnMenuPressed) {
+        switch (menuCursor) {
+            case 0: currentState = STATE_CALIBRATION_1_POINT_SELECT; menuCursor = 0; break;
+            case 1: currentState = STATE_CALIBRATION_2_POINTS_SELECT_1; menuCursor = 0; break;
+            case 2: currentState = STATE_MAIN_MENU; menuCursor = 1; break;
         }
+        screenNeedsRedraw = true;
     }
 }
 
-void updateLcdFromBuffer() {
-    for (int r = 0; r < LCD_ROWS; r++) {
-        for (int c = 0; c < LCD_COLUMNS; c++) {
-            if (lcdBuffer[r][c] != prevLcdBuffer[r][c]) {
-                lcd.setCursor(c, r);
-                lcd.write(lcdBuffer[r][c]);
-                prevLcdBuffer[r][c] = lcdBuffer[r][c];
-            }
-        }
+void handleCalib1PointSelect() {
+    if (screenNeedsRedraw) {
+        displayCalibSelect(F("CALIBRAR 1 PONTO"), F("Selecione SOLUCAO:"), 0);
+        screenNeedsRedraw = false;
     }
-}
-
-void runTetrisStep() {
-    if (millis() - tetrisLastFallTime > TETRIS_FALL_DELAY) {
-        tetrisLastFallTime = millis();
-        if (currentRow >= 0 && currentRow < LCD_ROWS && currentCol >= 0 && currentCol < LCD_COLUMNS) {
-            lcdBuffer[currentRow][currentCol] = tetrisGrid[currentRow][currentCol] ? (byte)0 : (byte)' ';
-        }
-        if (!checkCollision(currentRow + 1, currentCol)) {
-            currentRow++;
+    if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+        currentState = STATE_CALIBRATION_MENU;
+        screenNeedsRedraw = true;
+        menuCursor = 0;
+        return;
+    }
+    if (btnUpPressed) {
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3;
+        screenNeedsRedraw = true;
+    }
+    if (btnDownPressed) {
+        menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0;
+        screenNeedsRedraw = true;
+    }
+    if (btnMenuPressed) {
+        if (menuCursor == 3) {
+            currentState = STATE_CALIBRATION_MENU;
+            menuCursor = 0;
         } else {
-            lockPiece();
-            bool isScreenFull = true;
-            bool isScreenEmpty = true;
-            for(int r = 0; r < LCD_ROWS; r++) {
-                for(int c = 0; c < LCD_COLUMNS; c++) {
-                    if (tetrisGrid[r][c] == 0) isScreenFull = false;
-                    if (tetrisGrid[r][c] == 1) isScreenEmpty = false;
+            float solutions[] = {4.01, 7.01, 10.01};
+            calibrationSolutionValue1 = solutions[menuCursor];
+            isTwoPointCalibration = false;
+            calibrationPoint = 1;
+            currentState = STATE_CALIBRATE_WAIT_FOR_POINT;
+        }
+        screenNeedsRedraw = true;
+    }
+}
+
+void handleCalib2PointsSelect1() {
+    if (screenNeedsRedraw) {
+        displayCalibSelect(F("CALIBRAR 2 PONTOS"), F("Selecione PONTO 1:"), 0);
+        screenNeedsRedraw = false;
+    }
+    if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+        currentState = STATE_CALIBRATION_MENU;
+        screenNeedsRedraw = true;
+        menuCursor = 0;
+        return;
+    }
+    if (btnUpPressed) {
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3;
+        screenNeedsRedraw = true;
+    }
+    if (btnDownPressed) {
+        menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0;
+        screenNeedsRedraw = true;
+    }
+    if (btnMenuPressed) {
+        if (menuCursor == 3) {
+            currentState = STATE_CALIBRATION_MENU;
+            menuCursor = 0;
+        } else {
+            float solutions[] = {4.01, 7.01, 10.01};
+            calibrationSolutionValue1 = solutions[menuCursor];
+            currentState = STATE_CALIBRATION_2_POINTS_SELECT_2;
+            menuCursor = 0;
+        }
+        screenNeedsRedraw = true;
+    }
+}
+
+void handleCalib2PointsSelect2() {
+    if (screenNeedsRedraw) {
+        displayCalibSelect(F("CALIBRAR 2 PONTOS"), F("Selecione PONTO 2:"), 1);
+        screenNeedsRedraw = false;
+    }
+     if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+        currentState = STATE_CALIBRATION_MENU;
+        screenNeedsRedraw = true;
+        menuCursor = 0;
+        return;
+    }
+    if (btnUpPressed) {
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 2;
+        screenNeedsRedraw = true;
+    }
+    if (btnDownPressed) {
+        menuCursor = (menuCursor < 2) ? menuCursor + 1 : 0;
+        screenNeedsRedraw = true;
+    }
+    if (btnMenuPressed) {
+        if (menuCursor == 2) {
+            currentState = STATE_CALIBRATION_2_POINTS_SELECT_1;
+            menuCursor = 0;
+        } else {
+            float solutions[] = {4.01, 7.01, 10.01};
+            int choiceIndex = 0;
+            for (int i = 0; i < 3; i++) {
+                if (abs(solutions[i] - calibrationSolutionValue1) > 0.1) {
+                    if (choiceIndex == menuCursor) {
+                        calibrationSolutionValue2 = solutions[i];
+                        break;
+                    }
+                    choiceIndex++;
                 }
             }
-            if ((tetrisAnimationMode && isScreenFull) || (!tetrisAnimationMode && isScreenEmpty)) {
-                tetrisAnimationMode = !tetrisAnimationMode;
-                delay(1000);
-                resetTetrisGrid(tetrisAnimationMode);
-                buildScreenBufferFromGrid();
-            }
-            spawnNewPiece();
-            if(checkCollision(currentRow, currentCol)){
-                resetTetrisGrid(tetrisAnimationMode);
-                buildScreenBufferFromGrid();
-            }
+            isTwoPointCalibration = true;
+            calibrationPoint = 1;
+            currentState = STATE_CALIBRATE_WAIT_FOR_POINT;
         }
-        if (currentRow >= 0 && currentRow < LCD_ROWS && currentCol >= 0 && currentCol < LCD_COLUMNS) {
-             lcdBuffer[currentRow][currentCol] = (tetrisAnimationMode ? (byte)0 : (byte)' ');
+        screenNeedsRedraw = true;
+    }
+}
+
+void handleCalibrateWaitForPoint() {
+    if (screenNeedsRedraw) {
+        float solutionValue = (calibrationPoint == 1) ? calibrationSolutionValue1 : calibrationSolutionValue2;
+        displayCalibInstruction(solutionValue);
+        screenNeedsRedraw = false;
+    }
+    if (btnMenuPressed) {
+        currentState = STATE_CALIBRATE_READING;
+        screenNeedsRedraw = true;
+    }
+}
+
+void handleCalibrateReading() {
+    float voltageReading = performCalibrationReading();
+    if (voltageReading < 0) {
+        currentState = STATE_CALIBRATION_ERROR;
+        screenNeedsRedraw = true;
+        return;
+    }
+    if (calibrationPoint == 1) {
+        tempVoltageReading1 = voltageReading;
+        if (isTwoPointCalibration) {
+            calibrationPoint = 2;
+            currentState = STATE_CALIBRATE_WAIT_FOR_POINT;
+        } else {
+            config.calibOffsetVoltage = tempVoltageReading1 + (config.calibSlope * (7.0 - calibrationSolutionValue1));
+            config.isCalibrated2Points = false;
+            saveConfigToEEPROM();
+            displaySuccessMessage("Calibragem OK!");
+            currentState = STATE_MONITORING;
         }
-        updateLcdFromBuffer();
+    } else {
+        tempVoltageReading2 = voltageReading;
+        if (abs(tempVoltageReading1 - tempVoltageReading2) > 0.01 && abs(calibrationSolutionValue1 - calibrationSolutionValue2) > 1) {
+            config.calibSlope = (tempVoltageReading1 - tempVoltageReading2) / (calibrationSolutionValue1 - calibrationSolutionValue2);
+            config.calibOffsetVoltage = tempVoltageReading1 + (config.calibSlope * (7.0 - calibrationSolutionValue1));
+            config.isCalibrated2Points = true;
+            saveConfigToEEPROM();
+            displaySuccessMessage("Calibragem OK!");
+            currentState = STATE_MONITORING;
+        } else {
+            currentState = STATE_CALIBRATION_ERROR;
+        }
+    }
+    screenNeedsRedraw = true;
+}
+
+void handleCalibrationError() {
+    if (screenNeedsRedraw) {
+        displayCalibrationError();
+        screenNeedsRedraw = false;
+    }
+    if (btnUpPressed || btnDownPressed) {
+        menuCursor = !menuCursor;
+        screenNeedsRedraw = true;
+    }
+    if (btnMenuPressed) {
+        if (menuCursor == 0) {
+            currentState = STATE_CALIBRATION_MENU;
+            menuCursor = 0;
+        } else {
+            currentState = STATE_MAIN_MENU;
+            menuCursor = 1;
+        }
+        screenNeedsRedraw = true;
+    }
+}
+
+void handleTechMenu() {
+    if (screenNeedsRedraw) {
+        displayTechMenu();
+        screenNeedsRedraw = false;
+    }
+    if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+        currentState = STATE_MONITORING;
+        screenNeedsRedraw = true;
+        return;
+    }
+    if (btnUpPressed) {
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 5;
+        screenNeedsRedraw = true;
+    }
+    if (btnDownPressed) {
+        menuCursor = (menuCursor < 5) ? menuCursor + 1 : 0;
+        screenNeedsRedraw = true;
+    }
+    if (btnMenuPressed) {
+        switch (menuCursor) {
+            case 0: currentState = STATE_TECH_RAW_VALUES; break;
+            case 1: currentState = STATE_TECH_CHECK_SENSORS; break;
+            case 2: currentState = STATE_TECH_ACTIVATE_PUMP; break;
+            case 3: currentState = STATE_TECH_SET_PUMP_TIMER; tempPumpDurationMs = config.pumpDurationMs; break;
+            case 4: currentState = STATE_TECH_RESTART_CONFIRM; menuCursor = 1; break;
+            case 5: currentState = STATE_MAIN_MENU; menuCursor = 2; break;
+        }
+        screenNeedsRedraw = true;
+    }
+}
+
+void handleTechRawValues() {
+    if (screenNeedsRedraw) {
+        drawTechRawValuesLayout();
+        screenNeedsRedraw = false;
+    }
+    updateTechRawValues();
+    if (btnMenuPressed) {
+        currentState = STATE_TECH_MENU;
+        screenNeedsRedraw = true;
+        menuCursor = 0;
+    }
+}
+
+void handleTechCheckSensors() {
+    if (screenNeedsRedraw) {
+        displaySensorCheckScreen();
+        checkSensors();
+        screenNeedsRedraw = false;
+    }
+    if (btnMenuPressed) {
+        currentState = STATE_TECH_MENU;
+        screenNeedsRedraw = true;
+        menuCursor = 1;
+    }
+}
+
+void handleTechActivatePump() {
+    if (screenNeedsRedraw) {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print(F("  ATIVACAO MANUAL   "));
+        lcd.setCursor(0, 1);
+        lcd.print(F("Mantenha UP para"));
+        lcd.setCursor(0, 2);
+        lcd.print(F("ligar a bomba."));
+        lcd.setCursor(0, 3);
+        lcd.print(F("MENU para Voltar"));
+        screenNeedsRedraw = false;
+    }
+    if (digitalRead(PIN_BTN_UP) == LOW) {
+        digitalWrite(PIN_MOSFET_PUMP, HIGH);
+    } else {
+        digitalWrite(PIN_MOSFET_PUMP, LOW);
+    }
+    if (btnMenuPressed) {
+        digitalWrite(PIN_MOSFET_PUMP, LOW);
+        currentState = STATE_TECH_MENU;
+        menuCursor = 2;
+        screenNeedsRedraw = true;
+    }
+}
+
+void handleTechSetPumpTimer() {
+  if (screenNeedsRedraw) {
+    displayTechSetPumpTimer();
+    screenNeedsRedraw = false;
+  }
+  if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+    currentState = STATE_TECH_MENU;
+    menuCursor = 3;
+    screenNeedsRedraw = true;
+    return;
+  }
+  if (btnUpPressed) {
+    tempPumpDurationMs += 500;
+    screenNeedsRedraw = true;
+  }
+  if (btnDownPressed) {
+    tempPumpDurationMs -= 500;
+    screenNeedsRedraw = true;
+  }
+  if (tempPumpDurationMs < 500 || tempPumpDurationMs > 10000) {
+    tempPumpDurationMs = 500;
+  }
+  if (btnMenuPressed) {
+    config.pumpDurationMs = tempPumpDurationMs;
+    saveConfigToEEPROM();
+    displaySuccessMessage("  TIMER SALVO!  ");
+    currentState = STATE_TECH_MENU;
+    menuCursor = 3;
+    screenNeedsRedraw = true;
+  }
+}
+
+void handleTechRestartConfirm() {
+    if (screenNeedsRedraw) {
+        displayRestartConfirm();
+        screenNeedsRedraw = false;
+    }
+    if (btnUpPressed || btnDownPressed) {
+        menuCursor = !menuCursor;
+        screenNeedsRedraw = true;
+    }
+    if (btnMenuPressed) {
+        if (menuCursor == 0) {
+            lcd.clear();
+            lcd.setCursor(0, 1);
+            lcd.print(F("  REINICIANDO...  "));
+            delay(2000);
+            while (true);
+        } else {
+            currentState = STATE_TECH_MENU;
+            screenNeedsRedraw = true;
+            menuCursor = 4;
+        }
     }
 }
 
 // =====================================================================================================================
-// Funções de Lógica de Controle - CORRIGIDO
+// Funções de Lógica de Controle
 // =====================================================================================================================
 void processPhSamples() {
   sort(phSamples, NUM_SAMPLES);
@@ -532,31 +895,167 @@ void activatePump() {
 }
 
 // =====================================================================================================================
-// Funções de Exibição na Tela (Display) - CORRIGIDO
+// Funções do Screensaver (Animação de Blocos)
 // =====================================================================================================================
-// ... (Omitindo as funções de display que não mudaram para brevidade)
+void resetTetrisGrid(bool mode) {
+    for (int r = 0; r < LCD_ROWS; r++) {
+        for (int c = 0; c < LCD_COLUMNS; c++) {
+            tetrisGrid[r][c] = mode ? 0 : 1;
+        }
+    }
+}
+
+void spawnNewPiece() {
+    currentRow = 0;
+    currentCol = random(LCD_COLUMNS);
+}
+
+bool checkCollision(int r, int c) {
+    if (r >= LCD_ROWS) {
+        return true;
+    }
+    if (r >= 0 && c >= 0 && r < LCD_ROWS && c < LCD_COLUMNS && tetrisGrid[r][c] == (tetrisAnimationMode ? 1 : 0)) {
+        return true;
+    }
+    return false;
+}
+
+void redrawFullGrid() {
+    lcd.clear();
+    for (int r = 0; r < LCD_ROWS; r++) {
+        for (int c = 0; c < LCD_COLUMNS; c++) {
+            if (tetrisGrid[r][c]) {
+                lcd.setCursor(c, r);
+                lcd.write((byte)0);
+            }
+        }
+    }
+}
+
+void runTetrisStep() {
+    if (millis() - tetrisLastFallTime > TETRIS_FALL_DELAY) {
+        tetrisLastFallTime = millis();
+
+        // Apaga a peça da posição antiga
+        if (currentRow >= 0 && currentRow < LCD_ROWS && currentCol >= 0 && currentCol < LCD_COLUMNS) {
+            lcd.setCursor(currentCol, currentRow);
+            // Redesenha o que estava no grid naquela posição (geralmente vazio)
+            if (tetrisGrid[currentRow][currentCol]) {
+                lcd.write((byte)0);
+            } else {
+                lcd.print(' ');
+            }
+        }
+
+        // Move a peça para a nova posição
+        if (!checkCollision(currentRow + 1, currentCol)) {
+            currentRow++;
+        } else {
+            // Trava a peça no grid
+            if (currentRow >= 0 && currentRow < LCD_ROWS && currentCol >= 0 && currentCol < LCD_COLUMNS) {
+                tetrisGrid[currentRow][currentCol] = 1;
+            }
+
+            // Verifica se a tela está cheia para inverter a animação
+            bool isScreenFull = true;
+            for(int r = 0; r < LCD_ROWS; r++) {
+                for(int c = 0; c < LCD_COLUMNS; c++) {
+                    if (tetrisGrid[r][c] == 0) {
+                        isScreenFull = false;
+                        break;
+                    }
+                }
+                if (!isScreenFull) break;
+            }
+
+            if (isScreenFull) {
+                delay(1000); // Pausa para o usuário ver a tela cheia
+                resetTetrisGrid(false); // Limpa o grid lógico
+                redrawFullGrid(); // Limpa a tela visualmente
+            }
+
+            spawnNewPiece();
+
+            // Se a nova peça já colide, a tela está cheia, então limpa tudo
+            if(checkCollision(currentRow, currentCol)){
+                resetTetrisGrid(false);
+                redrawFullGrid();
+            }
+        }
+
+        // Desenha a peça na nova posição
+        if (currentRow >= 0 && currentRow < LCD_ROWS && currentCol >= 0 && currentCol < LCD_COLUMNS) {
+             lcd.setCursor(currentCol, currentRow);
+             lcd.write((byte)0);
+        }
+    }
+}
+
+// =====================================================================================================================
+// Funções de Calibragem
+// =====================================================================================================================
+float performCalibrationReading() {
+    float lastAvg = 0, currentAvg = 0;
+    for (int attempt = 0; attempt < CALIBRATION_MAX_ATTEMPTS; attempt++) {
+        lcd.clear();
+        lcd.setCursor(0, 1);
+        lcd.print(F("Lendo... Tentativa "));
+        lcd.print(attempt + 1);
+        float samples[NUM_SAMPLES];
+        for (int i = 0; i < NUM_SAMPLES; i++) {
+            samples[i] = ads.computeVolts(ads.readADC_SingleEnded(ADS_CHANNEL_PH));
+            delay(SAMPLING_INTERVAL_MS);
+            wdt_reset();
+        }
+        sort(samples, NUM_SAMPLES);
+        float sum = 0;
+        for (int i = NUM_SAMPLES_TO_DISCARD; i < NUM_SAMPLES - NUM_SAMPLES_TO_DISCARD; i++) {
+            sum += samples[i];
+        }
+        currentAvg = sum / (NUM_SAMPLES - 2 * NUM_SAMPLES_TO_DISCARD);
+        if (attempt > 0 && abs(currentAvg - lastAvg) <= 0.001) {
+            return currentAvg;
+        }
+        lastAvg = currentAvg;
+    }
+    return -1.0;
+}
+
+// =====================================================================================================================
+// Funções de Exibição na Tela (Display)
+// =====================================================================================================================
+void displayStartupMessage() {
+  lcd.clear();
+  lcd.setCursor(0, 1);
+  lcd.print(F(" Controlador de pH"));
+  lcd.setCursor(0, 2);
+  lcd.print(F("  Inicializando..."));
+}
+
+void drawMonitoringLayout() {
+  lcd.clear();
+  lcd.setCursor(0, 1);
+  lcd.print(F("PH ATUAL: "));
+  lcd.setCursor(0, 2);
+  lcd.print(F("PH INST:  "));
+  lcd.setCursor(0, 3);
+  lcd.print(F("T:"));
+  lcd.setCursor(6, 3);
+  lcd.print((char)223);
+  lcd.print(F("C  Ideal:"));
+}
 
 void updateMonitoringValues() {
   static int spinnerPos = 0;
   const char spinner[] = "|/-\\";
   static PhStatus lastPhStatus = PH_NORMAL;
-
   if (screenNeedsRedraw || currentPhStatus != lastPhStatus) {
     lcd.setCursor(0, 0);
     switch (currentPhStatus) {
-      case PH_LOW:
-        lcd.print(F(" PH ATUAL < IDEAL   "));
-        break;
-      case PH_HIGH:
-        lcd.print(F(" AJUSTANDO PH(AGUAR)"));
-        break;
-      case PH_PUMPING:
-        lcd.print(F(" BOMBEANDO...       "));
-        break;
-      case PH_NORMAL:
-      default:
-        lcd.print(F(" MONITORANDO        "));
-        break;
+      case PH_LOW: lcd.print(F(" PH ATUAL < IDEAL   ")); break;
+      case PH_HIGH: lcd.print(F(" AJUSTANDO PH(AGUAR)")); break;
+      case PH_PUMPING: lcd.print(F(" BOMBEANDO...       ")); break;
+      case PH_NORMAL: default: lcd.print(F(" MONITORANDO        ")); break;
     }
   }
   lcd.setCursor(19, 0);
@@ -577,8 +1076,204 @@ void updateMonitoringValues() {
   lcd.print(" ");
 }
 
+void displayInitialMenu() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("    MENU INICIAL    "));
+    const char* options[] = {"Monitorar", "Calibrar Sonda", "Menu Tecnico"};
+    for (int i = 0; i < 3; i++) {
+        lcd.setCursor(1, i + 1);
+        lcd.print(menuCursor == i ? ">" : " ");
+        lcd.print(options[i]);
+    }
+}
+
+void displayMainMenu() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("   MENU PRINCIPAL   "));
+    const char* options[] = {"Definir PH Ideal", "Calibrar Sonda", "Menu Tecnico", "Voltar"};
+    const int numOptions = 4;
+    int displayOffset = 0;
+    if (menuCursor > 2) {
+        displayOffset = menuCursor - 2;
+    }
+    for (int i = 0; i < 3; i++) {
+        int optionIndex = i + displayOffset;
+        if (optionIndex < numOptions) {
+            lcd.setCursor(1, i + 1);
+            lcd.print(menuCursor == optionIndex ? ">" : " ");
+            lcd.print(options[optionIndex]);
+        }
+    }
+}
+
+void displaySetPhIdeal() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("  DEFINIR PH IDEAL  "));
+  lcd.setCursor(0, 2);
+  lcd.print(F("   PH Ideal: "));
+  lcd.print(tempPhIdeal, 1);
+  lcd.setCursor(0, 3);
+  lcd.print(F("Press. MENU p/salvar"));
+}
+
+void displayCalibrationMenu() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("  CALIBRAR SONDA  "));
+    const char* options[] = {"1 Ponto", "2 Pontos", "Voltar"};
+    for (int i = 0; i < 3; i++) {
+        lcd.setCursor(1, i + 1);
+        lcd.print(menuCursor == i ? ">" : " ");
+        lcd.print(options[i]);
+    }
+}
+
+void displayCalibSelect(const __FlashStringHelper* title, const __FlashStringHelper* subtitle, int pointNum) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(title);
+    lcd.setCursor(0, 1);
+    lcd.print(subtitle);
+    const int numVisibleOptions = 2;
+    const char* options[4];
+    int numOptions;
+    if (pointNum == 0) {
+        options[0] = "Solucao 4.01";
+        options[1] = "Solucao 7.01";
+        options[2] = "Solucao 10.01";
+        options[3] = "Voltar";
+        numOptions = 4;
+    } else {
+        numOptions = 0;
+        float allSolutions[] = {4.01, 7.01, 10.01};
+        const char* allOptions[] = {"Solucao 4.01", "Solucao 7.01", "Solucao 10.01"};
+        for(int i=0; i<3; i++){
+            if(abs(allSolutions[i] - calibrationSolutionValue1) > 0.1){
+                options[numOptions++] = allOptions[i];
+            }
+        }
+        options[numOptions++] = "Voltar";
+    }
+    int displayOffset = 0;
+    if (menuCursor >= numVisibleOptions) {
+        displayOffset = menuCursor - (numVisibleOptions - 1);
+    }
+    for (int i = 0; i < numVisibleOptions; i++) {
+        int optionIndex = i + displayOffset;
+        lcd.setCursor(0, i + 2);
+        lcd.print("                    ");
+        if (optionIndex < numOptions) {
+            lcd.setCursor(1, i + 2);
+            lcd.print(menuCursor == optionIndex ? ">" : " ");
+            lcd.print(options[optionIndex]);
+        }
+    }
+}
+
+void displayCalibInstruction(float solution) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("Insira a sonda na"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("solucao de pH "));
+    lcd.print(solution, 2);
+    lcd.setCursor(0, 3);
+    lcd.print(F("Press. MENU quando"));
+}
+
+void displayCalibrationError() {
+    lcd.clear();
+    lcd.setCursor(0, 1);
+    lcd.print(F(" ERRO DE CALIBRAGEM "));
+    lcd.setCursor(1, 2);
+    lcd.print(menuCursor == 0 ? ">" : " ");
+    lcd.print("Tentar Novamente");
+    lcd.setCursor(1, 3);
+    lcd.print(menuCursor == 1 ? ">" : " ");
+    lcd.print("Voltar");
+}
+
+void displayTechMenu() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("    MENU TECNICO    "));
+    const char* options[] = {"Valores Brutos", "Checar Sensores", "Ativar Bomba", "Timer Bomba", "Reiniciar", "Voltar"};
+    const int numOptions = 6;
+    int displayOffset = 0;
+    if (menuCursor > 2) {
+        displayOffset = menuCursor - 2;
+    }
+    for (int i = 0; i < 3; i++) {
+        int optionIndex = i + displayOffset;
+        if (optionIndex < numOptions) {
+            lcd.setCursor(1, i + 1);
+            lcd.print(menuCursor == optionIndex ? ">" : " ");
+            lcd.print(options[optionIndex]);
+        }
+    }
+}
+
+void drawTechRawValuesLayout() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("   VALORES BRUTOS   "));
+    lcd.setCursor(0, 1);
+    lcd.print(F("pH(V): "));
+    lcd.setCursor(0, 2);
+    lcd.print(F("Temp(C): "));
+    lcd.setCursor(0, 3);
+    lcd.print(F("MENU para Voltar"));
+}
+
+void updateTechRawValues() {
+    lcd.setCursor(7, 1);
+    lcd.print(ads.computeVolts(ads.readADC_SingleEnded(ADS_CHANNEL_PH)), 4);
+    lcd.setCursor(9, 2);
+    lcd.print(currentTemperature, 2);
+}
+
+void displaySensorCheckScreen() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("  CHECANDO SENSORES "));
+    lcd.setCursor(0, 2);
+    lcd.print(F("      Aguarde...    "));
+}
+
+void displayRestartConfirm() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F(" REINICIAR SISTEMA? "));
+    lcd.setCursor(5, 2);
+    lcd.print(menuCursor == 0 ? ">SIM" : " SIM");
+    lcd.setCursor(12, 2);
+    lcd.print(menuCursor == 1 ? ">NAO" : " NAO");
+}
+
+void displayTechSetPumpTimer() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F(" AJUSTAR TIMER BOMBA"));
+  lcd.setCursor(0, 2);
+  lcd.print(F("  Tempo: "));
+  lcd.print(tempPumpDurationMs / 1000.0, 1);
+  lcd.print(F("s"));
+  lcd.setCursor(0, 3);
+  lcd.print(F("Press. MENU p/salvar"));
+}
+
+void displaySuccessMessage(const char* message) {
+    lcd.clear();
+    lcd.setCursor(0, 1);
+    lcd.print(message);
+    delay(2000);
+}
+
 // =====================================================================================================================
-// Funções Utilitárias - CORRIGIDO
+// Funções Utilitárias
 // =====================================================================================================================
 void saveConfigToEEPROM() {
   EEPROM.put(EEPROM_ADDR_MAGIC, EEPROM_MAGIC_VALUE);
@@ -618,8 +1313,21 @@ void sort(float a[], int size) {
     }
   }
 }
-// O resto das funções (handle... e display...) permanecem aqui
-// ...
-// ...
-// ...
-// (Fim do arquivo)
+
+void checkSensors() {
+    delay(1500);
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F(" STATUS DOS SENSORES"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("LCD I2C: OK"));
+    Wire.beginTransmission(ADS1115_ADDRESS);
+    byte error = Wire.endTransmission();
+    lcd.setCursor(0, 2);
+    lcd.print(F("ADS1115: "));
+    lcd.print(error == 0 ? "OK" : "FALHA");
+    lcd.setCursor(0, 3);
+    lcd.print(F("DS18B20: "));
+    tempSensor.requestTemperatures();
+    lcd.print(tempSensor.getTempCByIndex(0) != DEVICE_DISCONNECTED_C ? "OK" : "FALHA");
+}
