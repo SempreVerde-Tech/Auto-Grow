@@ -117,6 +117,7 @@ enum SystemState {
   STATE_STARTUP,
   STATE_INITIAL_MENU,
   STATE_MONITORING,
+  STATE_SCREENSAVER,
   STATE_MAIN_MENU,
   STATE_SET_PH_IDEAL,
   STATE_CALIBRATION_MENU,
@@ -182,6 +183,49 @@ int calibrationPoint;                 // Para rastrear qual ponto está sendo ca
 bool isTwoPointCalibration;           // Flag para saber o tipo de calibração em andamento
 
 // =====================================================================================================================
+// Variáveis e Estruturas do Screensaver Tetris
+// =====================================================================================================================
+byte tetrisGrid[LCD_ROWS][LCD_COLUMNS]; // 0 = vazio, 1 = cheio
+
+// Definição das 7 peças do Tetris (Tetrominós) e suas 4 rotações em matrizes 4x4.
+// Usamos PROGMEM para armazenar esses dados na memória Flash e economizar a preciosa RAM.
+const bool PIECES[7][4][4][4] PROGMEM = {
+  // Peça I
+  {{{0,0,0,0},{1,1,1,1},{0,0,0,0},{0,0,0,0}}, {{0,1,0,0},{0,1,0,0},{0,1,0,0},{0,1,0,0}}, {{0,0,0,0},{1,1,1,1},{0,0,0,0},{0,0,0,0}}, {{0,1,0,0},{0,1,0,0},{0,1,0,0},{0,1,0,0}}},
+  // Peça J
+  {{{1,0,0,0},{1,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,1,1,0},{0,1,0,0},{0,1,0,0},{0,0,0,0}}, {{0,0,0,0},{1,1,1,0},{0,0,1,0},{0,0,0,0}}, {{0,1,0,0},{0,1,0,0},{1,1,0,0},{0,0,0,0}}},
+  // Peça L
+  {{{0,0,1,0},{1,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,1,0,0},{0,1,0,0},{0,1,1,0},{0,0,0,0}}, {{0,0,0,0},{1,1,1,0},{1,0,0,0},{0,0,0,0}}, {{1,1,0,0},{0,1,0,0},{0,1,0,0},{0,0,0,0}}},
+  // Peça O
+  {{{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}}},
+  // Peça S
+  {{{0,1,1,0},{1,1,0,0},{0,0,0,0},{0,0,0,0}}, {{0,1,0,0},{0,1,1,0},{0,0,1,0},{0,0,0,0}}, {{0,1,1,0},{1,1,0,0},{0,0,0,0},{0,0,0,0}}, {{0,1,0,0},{0,1,1,0},{0,0,1,0},{0,0,0,0}}},
+  // Peça T
+  {{{0,1,0,0},{1,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,1,0,0},{0,1,1,0},{0,1,0,0},{0,0,0,0}}, {{0,0,0,0},{1,1,1,0},{0,1,0,0},{0,0,0,0}}, {{0,1,0,0},{1,1,0,0},{0,1,0,0},{0,0,0,0}}},
+  // Peça Z
+  {{{1,1,0,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,0,1,0},{0,1,1,0},{0,1,0,0},{0,0,0,0}}, {{1,1,0,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,0,1,0},{0,1,1,0},{0,1,0,0},{0,0,0,0}}}
+};
+
+// Variáveis de estado do jogo Tetris
+int currentPiece, currentRotation, currentRow, currentCol;
+unsigned long tetrisLastFallTime = 0;
+bool tetrisAnimationMode = true; // true = preenchendo, false = limpando
+const int TETRIS_FALL_DELAY = 200; // Milissegundos entre cada passo da peça
+
+// Custom character para o bloco do Tetris
+byte blockChar[8] = {
+  B11111,
+  B11111,
+  B11111,
+  B11111,
+  B11111,
+  B11111,
+  B11111,
+  B11111
+};
+
+
+// =====================================================================================================================
 // Função setup() - Executada uma única vez quando o Arduino é ligado ou resetado
 // =====================================================================================================================
 void setup() {
@@ -198,12 +242,13 @@ void setup() {
   pinMode(PIN_BTN_DOWN, INPUT_PULLUP);
   pinMode(PIN_MOSFET_PUMP, OUTPUT);
   pinMode(PIN_LED_LOW_PH, OUTPUT);
-  digitalWrite(PIN_MOSFET_PUMP, LOW); // Garante que a bomba comece DESLIGADA (Bomba é ativada com sinal HIGH)
+  digitalWrite(PIN_MOSFET_PUMP, LOW); // Garante que a bomba comece DESLIGADA (MOSFET é ativado com sinal HIGH)
   digitalWrite(PIN_LED_LOW_PH, LOW);  // Garante que o LED comece desligado
 
   // --- Inicialização dos Módulos I2C e Sensores ---
   lcd.init();
   lcd.backlight();
+  lcd.createChar(0, blockChar); // Cria o caractere customizado para o bloco do Tetris
   displayStartupMessage();
 
   ads.begin();
@@ -250,6 +295,9 @@ void loop() {
     case STATE_MONITORING:
       handleMonitoring();
       break;
+    case STATE_SCREENSAVER:
+      handleScreensaver();
+      break;
     case STATE_MAIN_MENU:
       handleMainMenu();
       break;
@@ -286,9 +334,9 @@ void loop() {
     case STATE_TECH_CHECK_SENSORS:
       handleTechCheckSensors();
       break;
-    case STATE_TECH_ACTIVATE_PUMP:
-      handleTechActivatePump();
-      break;
+      case STATE_TECH_ACTIVATE_PUMP:
+        handleTechActivatePump();
+        break;
     case STATE_TECH_RESTART_CONFIRM:
       handleTechRestartConfirm();
       break;
@@ -417,12 +465,16 @@ float convertVoltageToPh(float voltage, float temperature) {
  * @brief Gerencia o estado de monitoramento principal.
  */
 void handleMonitoring() {
-  // Lógica para evitar flickering: desenha o layout uma vez, depois só atualiza os valores.
+  // Lógica para evitar flickering: desenha o layout e atualiza os valores.
   if (screenNeedsRedraw) {
     drawMonitoringLayout();
-    screenNeedsRedraw = false;
+    lastActivityTime = millis(); // Reseta o timer de inatividade ao (re)entrar na tela
   }
   updateMonitoringValues();
+
+  // Agora que a tela foi redesenhada (se necessário), reseta a flag para evitar
+  // que o layout seja redesenhado a cada ciclo.
+  screenNeedsRedraw = false;
 
   // Processa as amostras de pH quando o buffer está cheio
   if (sampleCount >= NUM_SAMPLES) {
@@ -436,12 +488,180 @@ void handleMonitoring() {
     currentState = STATE_MAIN_MENU;
     screenNeedsRedraw = true;
     menuCursor = 0;
+    return; // Sai da função para evitar que o screensaver seja ativado na mesma iteração
   }
 
   // Verifica se a bomba está em cooldown
   if (isPumpOnCooldown && (millis() - pumpCooldownStartTime >= PUMP_COOLDOWN_MS)) {
     isPumpOnCooldown = false;
   }
+
+  // Verifica o timeout para o screensaver
+  if (millis() - lastActivityTime > SCREENSAVER_TIMEOUT_MS) {
+      currentState = STATE_SCREENSAVER;
+      screenNeedsRedraw = true;
+  }
+}
+
+/**
+ * @brief Gerencia o estado do screensaver.
+ * Executa a animação e verifica se um botão foi pressionado para sair.
+ */
+void handleScreensaver() {
+    // Se qualquer botão for pressionado, saia do screensaver e volte para o monitoramento.
+    if (btnMenuPressed || btnUpPressed || btnDownPressed) {
+        currentState = STATE_MONITORING;
+        screenNeedsRedraw = true; // Força o redesenho completo da tela de monitoramento.
+        return;
+    }
+
+    // Se estamos entrando no modo screensaver, inicializa o jogo/animação.
+    if (screenNeedsRedraw) {
+        resetTetrisGrid(tetrisAnimationMode);
+        spawnNewPiece();
+        screenNeedsRedraw = false;
+    }
+
+    // Executa um passo da animação
+    runTetrisStep();
+}
+
+// =====================================================================================================================
+// Funções do Screensaver Tetris
+// =====================================================================================================================
+
+/**
+ * @brief Reinicia a grade do Tetris para um novo jogo/animação.
+ * @param mode Se true, limpa a grade (modo de preenchimento). Se false, preenche a grade (modo de limpeza).
+ */
+void resetTetrisGrid(bool mode) {
+    for (int r = 0; r < LCD_ROWS; r++) {
+        for (int c = 0; c < LCD_COLUMNS; c++) {
+            tetrisGrid[r][c] = mode ? 0 : 1;
+        }
+    }
+}
+
+/**
+ * @brief Gera uma nova peça aleatória no topo da tela.
+ */
+void spawnNewPiece() {
+    currentPiece = random(7);
+    currentRotation = random(4);
+    currentRow = -2; // Começa um pouco acima da tela para a peça "cair" para dentro
+    currentCol = random(LCD_COLUMNS - 3);
+}
+
+/**
+ * @brief Verifica se a peça atual na posição (r, c) colide com a grade ou limites.
+ * @return true se houver colisão, false caso contrário.
+ */
+bool checkCollision(int r, int c) {
+    for (int y = 0; y < 4; y++) {
+        for (int x = 0; x < 4; x++) {
+            // pgm_read_byte lê um byte da memória de programa (PROGMEM)
+            if (pgm_read_byte(&PIECES[currentPiece][currentRotation][y][x])) {
+                int gridRow = r + y;
+                int gridCol = c + x;
+                // Verifica colisão com as paredes ou com o chão
+                if (gridCol < 0 || gridCol >= LCD_COLUMNS || gridRow >= LCD_ROWS) {
+                    return true;
+                }
+                // Verifica colisão com outras peças já na grade
+                if (gridRow >= 0 && tetrisGrid[gridRow][gridCol] == (tetrisAnimationMode ? 1 : 0)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+/**
+ * @brief "Trava" a peça atual na grade do Tetris.
+ */
+void lockPiece() {
+    for (int y = 0; y < 4; y++) {
+        for (int x = 0; x < 4; x++) {
+            if (pgm_read_byte(&PIECES[currentPiece][currentRotation][y][x])) {
+                int gridRow = currentRow + y;
+                int gridCol = currentCol + x;
+                if (gridRow >= 0 && gridRow < LCD_ROWS && gridCol >= 0 && gridCol < LCD_COLUMNS) {
+                    tetrisGrid[gridRow][gridCol] = tetrisAnimationMode ? 1 : 0;
+                }
+            }
+        }
+    }
+}
+
+/**
+ * @brief Desenha a grade do Tetris e a peça caindo no LCD.
+ */
+void drawTetris() {
+    lcd.clear();
+    // Desenha a grade
+    for (int r = 0; r < LCD_ROWS; r++) {
+        for (int c = 0; c < LCD_COLUMNS; c++) {
+            if (tetrisGrid[r][c]) {
+                lcd.setCursor(c, r);
+                lcd.write((byte)0); // Caractere customizado do bloco
+            }
+        }
+    }
+    // Desenha a peça caindo
+    for (int y = 0; y < 4; y++) {
+        for (int x = 0; x < 4; x++) {
+            if (pgm_read_byte(&PIECES[currentPiece][currentRotation][y][x])) {
+                int r = currentRow + y;
+                int c = currentCol + x;
+                if(r >= 0 && r < LCD_ROWS && c >= 0 && c < LCD_COLUMNS){
+                  lcd.setCursor(c, r);
+                  lcd.write((byte)(tetrisAnimationMode ? 0 : ' '));
+                }
+            }
+        }
+    }
+}
+
+/**
+ * @brief Executa um passo da animação do Tetris.
+ */
+void runTetrisStep() {
+    if (millis() - tetrisLastFallTime > TETRIS_FALL_DELAY) {
+        tetrisLastFallTime = millis();
+
+        // Tenta mover a peça para baixo
+        if (!checkCollision(currentRow + 1, currentCol)) {
+            currentRow++;
+        } else {
+            // Se colidiu, trava a peça no lugar
+            lockPiece();
+
+            // Verifica se a tela está cheia/vazia para trocar o modo
+            bool isScreenFull = true;
+            bool isScreenEmpty = true;
+            for(int r = 0; r < LCD_ROWS; r++) {
+                for(int c = 0; c < LCD_COLUMNS; c++) {
+                    if (tetrisGrid[r][c] == 0) isScreenFull = false;
+                    if (tetrisGrid[r][c] == 1) isScreenEmpty = false;
+                }
+            }
+
+            if ((tetrisAnimationMode && isScreenFull) || (!tetrisAnimationMode && isScreenEmpty)) {
+                tetrisAnimationMode = !tetrisAnimationMode; // Inverte o modo
+                delay(1000); // Pausa antes de começar o próximo modo
+                resetTetrisGrid(tetrisAnimationMode);
+            }
+
+            // Gera uma nova peça
+            spawnNewPiece();
+            // Se a nova peça já colide ao ser gerada, a tela está bloqueada, então reseta.
+            if(checkCollision(currentRow, currentCol)){
+                resetTetrisGrid(tetrisAnimationMode);
+            }
+        }
+        drawTetris();
+    }
 }
 
 /**
@@ -496,11 +716,11 @@ void handleMainMenu() {
   }
 
   if (btnUpPressed) {
-    menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3;
+    menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3; // 4 opções (0-3)
     screenNeedsRedraw = true;
   }
   if (btnDownPressed) {
-    menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0;
+    menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0; // 4 opções (0-3)
     screenNeedsRedraw = true;
   }
 
@@ -624,11 +844,11 @@ void handleCalib1PointSelect() {
         return;
     }
     if (btnUpPressed) {
-        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 4;
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3; // 4 opções (0-3)
         screenNeedsRedraw = true;
     }
     if (btnDownPressed) {
-        menuCursor = (menuCursor < 4) ? menuCursor + 1 : 0;
+        menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0; // 4 opções (0-3)
         screenNeedsRedraw = true;
     }
 
@@ -840,11 +1060,11 @@ void handleTechMenu() {
         return;
     }
     if (btnUpPressed) {
-        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 3;
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 4; // 5 opções (0-4)
         screenNeedsRedraw = true;
     }
     if (btnDownPressed) {
-        menuCursor = (menuCursor < 3) ? menuCursor + 1 : 0;
+        menuCursor = (menuCursor < 4) ? menuCursor + 1 : 0; // 5 opções (0-4)
         screenNeedsRedraw = true;
     }
 
@@ -948,8 +1168,8 @@ void handleTechActivatePump() {
 
     // Lógica de controle direto da bomba.
     // O pino do botão UP usa INPUT_PULLUP (LOW quando pressionado).
-    // A bomba é ativada com sinal HIGH.
-    if (digitalRead(PIN_BTN_UP) == LOW) {
+    // O MOSFET é ativado com sinal HIGH.
+    if (digitalRead(PIN_BTN_UP) == HIGH) {
         digitalWrite(PIN_MOSFET_PUMP, HIGH); // Botão pressionado, LIGA a bomba.
     } else {
         digitalWrite(PIN_MOSFET_PUMP, LOW); // Botão solto, DESLIGA a bomba.
@@ -989,7 +1209,7 @@ void handleTechRestartConfirm() {
         } else { // NÃO
             currentState = STATE_TECH_MENU;
             screenNeedsRedraw = true;
-            menuCursor = 2;
+            menuCursor = 3; // Corrected to point to "Reiniciar"
         }
     }
 }
@@ -1127,8 +1347,7 @@ void displayStartupMessage() {
  */
 void drawMonitoringLayout() {
   lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(F("MONITORANDO"));
+  // A linha de título (linha 0) será gerenciada por updateMonitoringValues()
 
   lcd.setCursor(0, 1);
   lcd.print(F("PH ATUAL: "));
