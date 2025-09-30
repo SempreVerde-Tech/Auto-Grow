@@ -205,6 +205,10 @@ byte blockChar[8] = {
   B11111
 };
 
+// Buffers de tela para o screensaver, para evitar flickering.
+char lcdBuffer[LCD_ROWS][LCD_COLUMNS];
+char prevLcdBuffer[LCD_ROWS][LCD_COLUMNS];
+
 
 // =====================================================================================================================
 // Função setup() - Executada uma única vez quando o Arduino é ligado ou resetado
