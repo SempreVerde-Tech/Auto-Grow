@@ -2,7 +2,7 @@
  * Controlador de PH Automático para Cultivo
  *
  * Autor: Jules (Assistente de IA)
- * Versão: 1.6.2
+ * Versão: 1.7.1
  * Data: 2024-07-25
  *
  * Descrição:
@@ -71,7 +71,7 @@ const int BUTTON_DEBOUNCE_DELAY = 50; // Tempo em milissegundos para evitar leit
 const float PH_IDEAL_DEFAULT = 7.0;             // Valor padrão para o pH ideal
 const float PH_CONTROL_THRESHOLD = 0.3;         // Variação de pH que inicia uma checagem de controle
 const float PH_STABILITY_THRESHOLD = 0.1;       // Variação máxima entre médias para considerar a leitura estável
-const unsigned long PUMP_DURATION_MS = 1000;    // Duração que a bomba fica ligada (em milissegundos). 1000ms = 1s.
+const unsigned long PUMP_DURATION_MS_DEFAULT = 1000; // Duração padrão que a bomba fica ligada (1s)
 const unsigned long PUMP_COOLDOWN_MS = 300000;  // Tempo de espera (5 minutos) antes de acionar a bomba novamente
 
 // --- Configurações de Leitura e Calibragem ---
@@ -107,6 +107,7 @@ struct SystemConfig {
   float calibOffsetVoltage;     // Tensão de offset (valor lido em pH 7.0)
   float calibSlope;             // Inclinação da curva de pH (calculada na calibragem de 2 pontos)
   bool isCalibrated2Points;     // Flag para saber se a calibragem de 2 pontos foi feita
+  unsigned long pumpDurationMs; // Duração que a bomba fica ligada (em milissegundos)
 };
 
 SystemConfig config; // Variável global que conterá todas as configurações do sistema
@@ -131,6 +132,7 @@ enum SystemState {
   STATE_TECH_RAW_VALUES,
   STATE_TECH_CHECK_SENSORS,
   STATE_TECH_ACTIVATE_PUMP,
+  STATE_TECH_SET_PUMP_TIMER, // Novo estado para ajustar o tempo da bomba
   STATE_TECH_RESTART_CONFIRM
 };
 
@@ -171,6 +173,7 @@ bool btnMenuPressed = false, btnUpPressed = false, btnDownPressed = false;
 // Variáveis de controle de menu
 unsigned long lastActivityTime = 0;   // 'millis()' da última interação do usuário com o menu
 float tempPhIdeal;                    // Valor temporário ao ajustar o pH ideal
+unsigned long tempPumpDurationMs;     // Valor temporário ao ajustar o timer da bomba
 int menuCursor = 0;                   // Posição do cursor nos menus
 bool screenNeedsRedraw = true;        // Flag para controlar a atualização da tela e evitar flickering
 
@@ -223,6 +226,10 @@ byte blockChar[8] = {
   B11111,
   B11111
 };
+
+// Buffers de tela para o screensaver, para evitar flickering.
+char lcdBuffer[LCD_ROWS][LCD_COLUMNS];
+char prevLcdBuffer[LCD_ROWS][LCD_COLUMNS];
 
 
 // =====================================================================================================================
@@ -336,6 +343,9 @@ void loop() {
       break;
       case STATE_TECH_ACTIVATE_PUMP:
         handleTechActivatePump();
+        break;
+    case STATE_TECH_SET_PUMP_TIMER:
+        handleSetPumpTimer();
         break;
     case STATE_TECH_RESTART_CONFIRM:
       handleTechRestartConfirm();
@@ -517,6 +527,13 @@ void handleScreensaver() {
 
     // Se estamos entrando no modo screensaver, inicializa o jogo/animação.
     if (screenNeedsRedraw) {
+        // Limpa a tela física e o buffer de tela anterior uma única vez.
+        lcd.clear();
+        for (int r = 0; r < LCD_ROWS; r++) {
+            for (int c = 0; c < LCD_COLUMNS; c++) {
+                prevLcdBuffer[r][c] = ' ';
+            }
+        }
         resetTetrisGrid(tetrisAnimationMode);
         spawnNewPiece();
         screenNeedsRedraw = false;
@@ -595,29 +612,49 @@ void lockPiece() {
 }
 
 /**
- * @brief Desenha a grade do Tetris e a peça caindo no LCD.
+ * @brief Desenha a grade do Tetris e a peça caindo no buffer de tela `lcdBuffer`.
+ * Não chama nenhuma função do LCD diretamente.
  */
-void drawTetris() {
-    lcd.clear();
-    // Desenha a grade
+void drawTetrisToBuffer() {
+    // 1. Limpa o buffer de trabalho com o estado atual da grade "travada"
     for (int r = 0; r < LCD_ROWS; r++) {
         for (int c = 0; c < LCD_COLUMNS; c++) {
             if (tetrisGrid[r][c]) {
-                lcd.setCursor(c, r);
-                lcd.write((byte)0); // Caractere customizado do bloco
+                lcdBuffer[r][c] = (char)0; // Caractere customizado do bloco
+            } else {
+                lcdBuffer[r][c] = ' '; // Espaço vazio
             }
         }
     }
-    // Desenha a peça caindo
+
+    // 2. Desenha a peça caindo sobre o buffer
     for (int y = 0; y < 4; y++) {
         for (int x = 0; x < 4; x++) {
             if (pgm_read_byte(&PIECES[currentPiece][currentRotation][y][x])) {
                 int r = currentRow + y;
                 int c = currentCol + x;
                 if(r >= 0 && r < LCD_ROWS && c >= 0 && c < LCD_COLUMNS){
-                  lcd.setCursor(c, r);
-                  lcd.write((byte)(tetrisAnimationMode ? 0 : ' '));
+                  // Se o modo de animação for "preencher", desenha um bloco.
+                  // Se for "limpar", desenha um espaço em branco.
+                  lcdBuffer[r][c] = (tetrisAnimationMode ? (char)0 : ' ');
                 }
+            }
+        }
+    }
+}
+
+/**
+ * @brief Compara o `lcdBuffer` com o `prevLcdBuffer` e atualiza apenas os caracteres que mudaram.
+ * Esta é a função chave para evitar o flickering.
+ */
+void updateLcdFromBuffer() {
+    for (int r = 0; r < LCD_ROWS; r++) {
+        for (int c = 0; c < LCD_COLUMNS; c++) {
+            // Se o caractere no buffer atual for diferente do que está na tela
+            if (lcdBuffer[r][c] != prevLcdBuffer[r][c]) {
+                lcd.setCursor(c, r);
+                lcd.write(lcdBuffer[r][c]); // Escreve o novo caractere
+                prevLcdBuffer[r][c] = lcdBuffer[r][c]; // Atualiza o buffer de "tela"
             }
         }
     }
@@ -650,6 +687,15 @@ void runTetrisStep() {
             if ((tetrisAnimationMode && isScreenFull) || (!tetrisAnimationMode && isScreenEmpty)) {
                 tetrisAnimationMode = !tetrisAnimationMode; // Inverte o modo
                 delay(1000); // Pausa antes de começar o próximo modo
+
+                // Força uma limpeza completa da tela para a transição de modo
+                lcd.clear();
+                for (int r = 0; r < LCD_ROWS; r++) {
+                   for (int c = 0; c < LCD_COLUMNS; c++) {
+                       prevLcdBuffer[r][c] = ' ';
+                   }
+                }
+
                 resetTetrisGrid(tetrisAnimationMode);
             }
 
@@ -660,7 +706,9 @@ void runTetrisStep() {
                 resetTetrisGrid(tetrisAnimationMode);
             }
         }
-        drawTetris();
+        // Lógica de desenho atualizada
+        drawTetrisToBuffer();
+        updateLcdFromBuffer();
     }
 }
 
@@ -1059,12 +1107,13 @@ void handleTechMenu() {
         screenNeedsRedraw = true;
         return;
     }
+    const int numOptions = 6; // Agora são 6 opções no menu
     if (btnUpPressed) {
-        menuCursor = (menuCursor > 0) ? menuCursor - 1 : 4; // 5 opções (0-4)
+        menuCursor = (menuCursor > 0) ? menuCursor - 1 : numOptions - 1;
         screenNeedsRedraw = true;
     }
     if (btnDownPressed) {
-        menuCursor = (menuCursor < 4) ? menuCursor + 1 : 0; // 5 opções (0-4)
+        menuCursor = (menuCursor < numOptions - 1) ? menuCursor + 1 : 0;
         screenNeedsRedraw = true;
     }
 
@@ -1079,13 +1128,17 @@ void handleTechMenu() {
             case 2: // Ativar Bomba
                 currentState = STATE_TECH_ACTIVATE_PUMP;
                 break;
-            case 3: // Reiniciar
+            case 3: // Timer Bomba
+                tempPumpDurationMs = config.pumpDurationMs; // Carrega o valor atual para edição
+                currentState = STATE_TECH_SET_PUMP_TIMER;
+                break;
+            case 4: // Reiniciar
                 currentState = STATE_TECH_RESTART_CONFIRM;
                 menuCursor = 1; // Padrão em "NÃO"
                 break;
-            case 4: // Voltar
+            case 5: // Voltar
                 currentState = STATE_MAIN_MENU;
-                menuCursor = 2;
+                menuCursor = 2; // Volta para a opção "Menu Tecnico"
                 break;
         }
         screenNeedsRedraw = true;
@@ -1185,6 +1238,53 @@ void handleTechActivatePump() {
 }
 
 /**
+ * @brief Gerencia a tela de ajuste do timer da bomba.
+ */
+void handleSetPumpTimer() {
+    if (screenNeedsRedraw) {
+        // A variável tempPumpDurationMs já foi carregada no handleTechMenu
+        displaySetPumpTimer();
+        screenNeedsRedraw = false;
+    }
+
+    // Timeout de inatividade
+    if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+        currentState = STATE_TECH_MENU;
+        menuCursor = 3; // Volta para a opção "Timer Bomba"
+        screenNeedsRedraw = true;
+        return;
+    }
+
+    // Lógica dos botões
+    if (btnUpPressed) {
+        tempPumpDurationMs += 500; // Incrementa de 0.5 em 0.5 segundos
+        screenNeedsRedraw = true;
+    }
+    if (btnDownPressed) {
+        if (tempPumpDurationMs >= 500) {
+            tempPumpDurationMs -= 500; // Decrementa de 0.5 em 0.5 segundos
+        } else {
+            tempPumpDurationMs = 0;
+        }
+        screenNeedsRedraw = true;
+    }
+
+    // Limita o valor para não exceder um tempo razoável (ex: 30 segundos)
+    if (tempPumpDurationMs > 30000) {
+        tempPumpDurationMs = 30000;
+    }
+
+    if (btnMenuPressed) {
+        config.pumpDurationMs = tempPumpDurationMs;
+        saveConfigToEEPROM();
+        displaySuccessMessage("  TIMER SALVO!  ");
+        currentState = STATE_TECH_MENU;
+        menuCursor = 3;
+        screenNeedsRedraw = true;
+    }
+}
+
+/**
  * @brief Gerencia a confirmação de reinício do sistema.
  */
 void handleTechRestartConfirm() {
@@ -1276,10 +1376,33 @@ void checkPhAndControl() {
  * @brief Ativa a bomba de pH Down por um período definido.
  */
 void activatePump() {
+  // Exibe a mensagem inicial
   displayPumpActionScreen(true);
+
+  // Liga a bomba e mostra a barra de progresso
   digitalWrite(PIN_MOSFET_PUMP, HIGH); // LIGA a bomba (ativo em HIGH)
-  delay(PUMP_DURATION_MS); // Neste caso, um delay é aceitável pois é uma ação curta e crítica
+
+  // Simula uma barra de progresso que corresponde ao tempo de acionamento da bomba
+  lcd.setCursor(0, 2);
+  if (config.pumpDurationMs > 0) {
+      // Calcula o tempo de cada passo da barra de progresso
+      int stepDelay = config.pumpDurationMs / LCD_COLUMNS;
+      if (stepDelay > 0) { // Garante que não haja delay(0) em loop
+        for(int i=0; i<LCD_COLUMNS; i++){
+          lcd.print((char)255); // Caractere de bloco
+          delay(stepDelay);
+          wdt_reset(); // Reseta o watchdog durante o delay
+        }
+      } else {
+        // Se o tempo total for muito curto, apenas fazemos o delay total
+        delay(config.pumpDurationMs);
+        wdt_reset();
+      }
+  }
+
   digitalWrite(PIN_MOSFET_PUMP, LOW); // DESLIGA a bomba
+
+  // Exibe a mensagem de conclusão
   displayPumpActionScreen(false);
 
   isPumpOnCooldown = true;
@@ -1552,23 +1675,42 @@ void displayTechMenu() {
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print(F("    MENU TECNICO    "));
-    const char* options[] = {"Valores Brutos", "Checar Sensores", "Ativar Bomba", "Reiniciar", "Voltar"};
-    const int numOptions = 5;
+    const char* options[] = {"Valores Brutos", "Checar Sensores", "Ativar Bomba", "Timer Bomba", "Reiniciar", "Voltar"};
+    const int numOptions = 6;
 
     // Lógica de rolagem para exibir 3 itens em uma tela com 1 linha de título
     int displayOffset = 0;
-    if (menuCursor > 2) {
-        displayOffset = menuCursor - 2;
+    if (menuCursor > 2) { // Se o cursor estiver além da terceira linha visível
+        displayOffset = menuCursor - 2; // Desloca a janela de visualização
     }
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 3; i++) { // Exibe até 3 itens
         int optionIndex = i + displayOffset;
         if (optionIndex < numOptions) {
+            lcd.setCursor(1, i + 1);
+            // Limpa o resto da linha para evitar artefatos de rolagem
+            lcd.print("                   ");
             lcd.setCursor(1, i + 1);
             lcd.print(menuCursor == optionIndex ? ">" : " ");
             lcd.print(options[optionIndex]);
         }
     }
+}
+
+/**
+ * @brief Desenha a tela de ajuste do timer da bomba.
+ */
+void displaySetPumpTimer() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("  AJUSTAR TIMER BOMBA  "));
+    lcd.setCursor(0, 2);
+    lcd.print(F("   Tempo: "));
+    // Converte de milissegundos para segundos para exibição
+    lcd.print((float)tempPumpDurationMs / 1000.0, 1);
+    lcd.print("s");
+    lcd.setCursor(0, 3);
+    lcd.print(F("MENU para Salvar"));
 }
 
 void displaySensorCheckScreen() {
@@ -1594,12 +1736,6 @@ void displayPumpActionScreen(bool isStarting) {
     lcd.setCursor(0, 1);
     if (isStarting) {
         lcd.print(F("   AJUSTANDO PH...  "));
-        // Simula uma barra de progresso
-        lcd.setCursor(0, 2);
-        for(int i=0; i<LCD_COLUMNS; i++){
-          lcd.print((char)255); // Caractere de bloco
-          delay(PUMP_DURATION_MS / LCD_COLUMNS);
-        }
     } else {
         lcd.print(F("  AJUSTE COMPLETO!  "));
         delay(2000); // Mostra a mensagem por 2 segundos
@@ -1632,9 +1768,16 @@ void saveConfigToEEPROM() {
 void loadConfigFromEEPROM() {
   int magic;
   EEPROM.get(EEPROM_ADDR_MAGIC, magic);
+  // Verifica o "número mágico" para ver se a EEPROM já foi inicializada.
   if (magic == EEPROM_MAGIC_VALUE) {
     // A EEPROM contém dados válidos, carrega-os
     EEPROM.get(EEPROM_ADDR_CONFIG, config);
+    // Verificação de segurança: se o pumpDuration não foi inicializado (comum ao atualizar de uma versão antiga),
+    // ele pode ter um valor lixo. Definimos um padrão se for o caso.
+    // Um valor muito grande ou zero seria um bom indicador.
+    if (config.pumpDurationMs == 0 || config.pumpDurationMs > 60000) { // Maior que 1 minuto é irreal
+        config.pumpDurationMs = PUMP_DURATION_MS_DEFAULT;
+    }
   } else {
     // EEPROM não inicializada ou dados corrompidos, usa valores padrão
     config.phIdeal = PH_IDEAL_DEFAULT;
@@ -1642,6 +1785,7 @@ void loadConfigFromEEPROM() {
     // Slope teórico em mV/pH a 25C. ADS1115 retorna V, então dividimos por 1000.
     config.calibSlope = -0.05916;
     config.isCalibrated2Points = false;
+    config.pumpDurationMs = PUMP_DURATION_MS_DEFAULT; // Define o padrão para o novo campo
     saveConfigToEEPROM(); // Salva os padrões para a próxima inicialização
   }
 }
