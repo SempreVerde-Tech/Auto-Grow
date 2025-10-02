@@ -494,8 +494,9 @@ void handleMonitoring() {
     return; // Sai da função para evitar que o screensaver seja ativado na mesma iteração
   }
 
-  // Verifica o timeout para o screensaver
-  if (millis() - lastActivityTime > SCREENSAVER_TIMEOUT_MS) {
+  // Verifica o timeout para o screensaver, mas só se o pH estiver normal.
+  // Se houver um alerta (pH alto ou baixo), a tela de monitoramento deve permanecer visível.
+  if (currentPhStatus == PH_NORMAL && (millis() - lastActivityTime > SCREENSAVER_TIMEOUT_MS)) {
       currentState = STATE_SCREENSAVER;
       screenNeedsRedraw = true;
   }
@@ -1311,8 +1312,13 @@ void checkPhAndControl() {
           return;               // Impede a ativação da bomba
         }
 
-        // Se não há erro, ativa a bomba.
-        activatePump();
+        // Se não há erro, e estamos na tela de monitoramento, ativa a bomba.
+        // A bomba só é ativada na tela de monitoramento para evitar conflitos de display com o screensaver.
+        // Se o pH ficar alto durante o screensaver, o sistema primeiro voltará para a tela de monitoramento
+        // e então ativará a bomba no próximo ciclo.
+        if (currentState == STATE_MONITORING) {
+            activatePump();
+        }
       }
     }
     // Caso 2: O pH está baixo.
