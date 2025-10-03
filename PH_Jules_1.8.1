@@ -494,9 +494,8 @@ void handleMonitoring() {
     return; // Sai da função para evitar que o screensaver seja ativado na mesma iteração
   }
 
-  // Verifica o timeout para o screensaver, mas só se o pH estiver normal.
-  // Se houver um alerta (pH alto ou baixo), a tela de monitoramento deve permanecer visível.
-  if (currentPhStatus == PH_NORMAL && (millis() - lastActivityTime > SCREENSAVER_TIMEOUT_MS)) {
+  // Verifica o timeout para o screensaver. O screensaver não deve ser ativado se houver um erro crítico de solução.
+  if (!solutionError && (millis() - lastActivityTime > SCREENSAVER_TIMEOUT_MS)) {
       currentState = STATE_SCREENSAVER;
       screenNeedsRedraw = true;
   }
@@ -507,9 +506,9 @@ void handleMonitoring() {
  * Executa a animação e verifica se um botão foi pressionado para sair.
  */
 void handleScreensaver() {
-    // Se qualquer botão for pressionado ou um novo alerta de pH for acionado,
-    // saia do screensaver e volte para o monitoramento para exibir o status.
-    if (btnMenuPressed || btnUpPressed || btnDownPressed || currentPhStatus != PH_NORMAL) {
+    // Sai do screensaver se um botão for pressionado ou se houver um erro crítico de solução.
+    // O screensaver continua durante a correção normal de pH.
+    if (btnMenuPressed || btnUpPressed || btnDownPressed || solutionError) {
         currentState = STATE_MONITORING;
         screenNeedsRedraw = true; // Força o redesenho completo da tela de monitoramento.
         return;
@@ -1312,12 +1311,12 @@ void checkPhAndControl() {
           return;               // Impede a ativação da bomba
         }
 
-        // Se não há erro, e estamos na tela de monitoramento, ativa a bomba.
-        // A bomba só é ativada na tela de monitoramento para evitar conflitos de display com o screensaver.
-        // Se o pH ficar alto durante o screensaver, o sistema primeiro voltará para a tela de monitoramento
-        // e então ativará a bomba no próximo ciclo.
+        // Se não há erro, ativa a bomba de acordo com o estado atual.
+        // Com animação na tela de monitoramento, silenciosamente no screensaver.
         if (currentState == STATE_MONITORING) {
-            activatePump();
+          activatePump();
+        } else if (currentState == STATE_SCREENSAVER) {
+          activatePumpSilently();
         }
       }
     }
@@ -1385,6 +1384,29 @@ void activatePump() {
 
   // Força o redesenho da tela de monitoramento para limpar a mensagem da bomba
   screenNeedsRedraw = true;
+}
+
+/**
+ * @brief Ativa a bomba de pH Down silenciosamente, sem feedback visual.
+ * Usado quando o screensaver está ativo.
+ */
+void activatePumpSilently() {
+  // Registra o pH e incrementa o contador de segurança
+  lastPhWhenPumped = currentPhAvg;
+  pumpActivationCount++;
+
+  // Ativa a bomba pela duração configurada
+  digitalWrite(PIN_MOSFET_PUMP, HIGH);
+  delay(config.pumpDurationMs);
+  wdt_reset(); // Reseta o watchdog após o delay
+  digitalWrite(PIN_MOSFET_PUMP, LOW);
+
+  // Inicia o período de cooldown
+  isPumpOnCooldown = true;
+  pumpCooldownStartTime = millis();
+
+  // Reseta o histórico de pH para evitar ações com dados antigos
+  for(int i=0; i<3; i++) stablePhHistory[i] = config.phIdeal;
 }
 
 
