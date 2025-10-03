@@ -2,7 +2,7 @@
  * Controlador de PH Automático para Cultivo
  *
  * Autor: Jules (Assistente de IA)
- * Versão: 1.7.1
+ * Versão: 1.8.1
  * Data: 2024-07-25
  *
  * Descrição:
@@ -163,6 +163,9 @@ float stablePhHistory[3];             // Histórico das últimas 3 médias está
 int stablePhHistoryIndex = 0;         // Índice para o histórico
 bool isPumpOnCooldown = false;        // Flag para indicar se a bomba está no período de espera
 unsigned long pumpCooldownStartTime = 0; // 'millis()' de quando o cooldown da bomba começou
+int pumpActivationCount = 0;          // Contador para ativações consecutivas da bomba sem efeito no pH
+bool solutionError = false;           // Flag para o erro de falta de solução de pH
+float lastPhWhenPumped = 0.0;         // Armazena o valor de pH na última ativação da bomba
 
 // Variáveis de estado dos botões
 int btnMenuState, btnUpState, btnDownState;
@@ -186,36 +189,16 @@ int calibrationPoint;                 // Para rastrear qual ponto está sendo ca
 bool isTwoPointCalibration;           // Flag para saber o tipo de calibração em andamento
 
 // =====================================================================================================================
-// Variáveis e Estruturas do Screensaver Tetris
+// Variáveis e Estruturas do Screensaver "Chuva"
 // =====================================================================================================================
-byte tetrisGrid[LCD_ROWS][LCD_COLUMNS]; // 0 = vazio, 1 = cheio
+byte tetrisGrid[LCD_ROWS][LCD_COLUMNS]; // 0 = vazio, 1 = cheio. Reutilizando o nome para minimizar mudanças.
 
-// Definição das 7 peças do Tetris (Tetrominós) e suas 4 rotações em matrizes 4x4.
-// Usamos PROGMEM para armazenar esses dados na memória Flash e economizar a preciosa RAM.
-const bool PIECES[7][4][4][4] PROGMEM = {
-  // Peça I
-  {{{0,0,0,0},{1,1,1,1},{0,0,0,0},{0,0,0,0}}, {{0,1,0,0},{0,1,0,0},{0,1,0,0},{0,1,0,0}}, {{0,0,0,0},{1,1,1,1},{0,0,0,0},{0,0,0,0}}, {{0,1,0,0},{0,1,0,0},{0,1,0,0},{0,1,0,0}}},
-  // Peça J
-  {{{1,0,0,0},{1,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,1,1,0},{0,1,0,0},{0,1,0,0},{0,0,0,0}}, {{0,0,0,0},{1,1,1,0},{0,0,1,0},{0,0,0,0}}, {{0,1,0,0},{0,1,0,0},{1,1,0,0},{0,0,0,0}}},
-  // Peça L
-  {{{0,0,1,0},{1,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,1,0,0},{0,1,0,0},{0,1,1,0},{0,0,0,0}}, {{0,0,0,0},{1,1,1,0},{1,0,0,0},{0,0,0,0}}, {{1,1,0,0},{0,1,0,0},{0,1,0,0},{0,0,0,0}}},
-  // Peça O
-  {{{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,1,1,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}}},
-  // Peça S
-  {{{0,1,1,0},{1,1,0,0},{0,0,0,0},{0,0,0,0}}, {{0,1,0,0},{0,1,1,0},{0,0,1,0},{0,0,0,0}}, {{0,1,1,0},{1,1,0,0},{0,0,0,0},{0,0,0,0}}, {{0,1,0,0},{0,1,1,0},{0,0,1,0},{0,0,0,0}}},
-  // Peça T
-  {{{0,1,0,0},{1,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,1,0,0},{0,1,1,0},{0,1,0,0},{0,0,0,0}}, {{0,0,0,0},{1,1,1,0},{0,1,0,0},{0,0,0,0}}, {{0,1,0,0},{1,1,0,0},{0,1,0,0},{0,0,0,0}}},
-  // Peça Z
-  {{{1,1,0,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,0,1,0},{0,1,1,0},{0,1,0,0},{0,0,0,0}}, {{1,1,0,0},{0,1,1,0},{0,0,0,0},{0,0,0,0}}, {{0,0,1,0},{0,1,1,0},{0,1,0,0},{0,0,0,0}}}
-};
+// Variáveis de estado do screensaver
+int screensaverBlockRow, screensaverBlockCol; // Posição do bloco caindo
+unsigned long screensaverLastFallTime = 0;
+const int SCREENSAVER_FALL_DELAY = 150; // Milissegundos entre cada passo do bloco
 
-// Variáveis de estado do jogo Tetris
-int currentPiece, currentRotation, currentRow, currentCol;
-unsigned long tetrisLastFallTime = 0;
-bool tetrisAnimationMode = true; // true = preenchendo, false = limpando
-const int TETRIS_FALL_DELAY = 200; // Milissegundos entre cada passo da peça
-
-// Custom character para o bloco do Tetris
+// Custom character para o bloco
 byte blockChar[8] = {
   B11111,
   B11111,
@@ -289,6 +272,23 @@ void loop() {
   // --- Leitura e Processamento de Entradas ---
   readButtons();      // Lê o estado dos botões
   readSensors();      // Lê os sensores de pH e temperatura
+
+  // --- Lógica de Controle de Fundo ---
+  // Esta lógica roda em paralelo com a interface, mas apenas nos estados relevantes.
+  if (currentState == STATE_MONITORING || currentState == STATE_SCREENSAVER) {
+    // Processa as amostras de pH quando o buffer está cheio
+    if (sampleCount >= NUM_SAMPLES) {
+      processPhSamples();
+      checkPhAndControl();
+      sampleCount = 0; // Reseta para a próxima rodada de amostragem
+    }
+
+    // Verifica se a bomba está em cooldown
+    if (isPumpOnCooldown && (millis() - pumpCooldownStartTime >= PUMP_COOLDOWN_MS)) {
+      isPumpOnCooldown = false;
+    }
+  }
+
 
   // --- Máquina de Estados ---
   // O 'switch' direciona a execução para a função que gerencia o estado atual do sistema.
@@ -486,13 +486,6 @@ void handleMonitoring() {
   // que o layout seja redesenhado a cada ciclo.
   screenNeedsRedraw = false;
 
-  // Processa as amostras de pH quando o buffer está cheio
-  if (sampleCount >= NUM_SAMPLES) {
-    processPhSamples();
-    checkPhAndControl();
-    sampleCount = 0; // Reseta para a próxima rodada de amostragem
-  }
-
   // Verifica se o botão MENU foi pressionado para ir ao menu principal
   if (btnMenuPressed) {
     currentState = STATE_MAIN_MENU;
@@ -501,13 +494,8 @@ void handleMonitoring() {
     return; // Sai da função para evitar que o screensaver seja ativado na mesma iteração
   }
 
-  // Verifica se a bomba está em cooldown
-  if (isPumpOnCooldown && (millis() - pumpCooldownStartTime >= PUMP_COOLDOWN_MS)) {
-    isPumpOnCooldown = false;
-  }
-
-  // Verifica o timeout para o screensaver
-  if (millis() - lastActivityTime > SCREENSAVER_TIMEOUT_MS) {
+  // Verifica o timeout para o screensaver. O screensaver não deve ser ativado se houver um erro crítico de solução.
+  if (!solutionError && (millis() - lastActivityTime > SCREENSAVER_TIMEOUT_MS)) {
       currentState = STATE_SCREENSAVER;
       screenNeedsRedraw = true;
   }
@@ -518,196 +506,137 @@ void handleMonitoring() {
  * Executa a animação e verifica se um botão foi pressionado para sair.
  */
 void handleScreensaver() {
-    // Se qualquer botão for pressionado, saia do screensaver e volte para o monitoramento.
-    if (btnMenuPressed || btnUpPressed || btnDownPressed) {
+    // Sai do screensaver se um botão for pressionado ou se houver um erro crítico de solução.
+    // O screensaver continua durante a correção normal de pH.
+    if (btnMenuPressed || btnUpPressed || btnDownPressed || solutionError) {
         currentState = STATE_MONITORING;
         screenNeedsRedraw = true; // Força o redesenho completo da tela de monitoramento.
         return;
     }
 
-    // Se estamos entrando no modo screensaver, inicializa o jogo/animação.
+    // Se estamos entrando no modo screensaver, inicializa a animação.
     if (screenNeedsRedraw) {
-        // Limpa a tela física e o buffer de tela anterior uma única vez.
-        lcd.clear();
-        for (int r = 0; r < LCD_ROWS; r++) {
-            for (int c = 0; c < LCD_COLUMNS; c++) {
-                prevLcdBuffer[r][c] = ' ';
-            }
-        }
-        resetTetrisGrid(tetrisAnimationMode);
-        spawnNewPiece();
+        resetScreensaverGrid();
+        spawnNewBlock();
         screenNeedsRedraw = false;
     }
 
     // Executa um passo da animação
-    runTetrisStep();
+    runScreensaverStep();
 }
 
 // =====================================================================================================================
-// Funções do Screensaver Tetris
+// Funções do Screensaver "Chuva"
 // =====================================================================================================================
 
 /**
- * @brief Reinicia a grade do Tetris para um novo jogo/animação.
- * @param mode Se true, limpa a grade (modo de preenchimento). Se false, preenche a grade (modo de limpeza).
+ * @brief Limpa a grade do screensaver, preenchendo com 0 (vazio).
  */
-void resetTetrisGrid(bool mode) {
+void resetScreensaverGrid() {
     for (int r = 0; r < LCD_ROWS; r++) {
         for (int c = 0; c < LCD_COLUMNS; c++) {
-            tetrisGrid[r][c] = mode ? 0 : 1;
+            tetrisGrid[r][c] = 0;
+        }
+    }
+    // Também limpa os buffers para forçar um redesenho completo
+    lcd.clear();
+    for (int r = 0; r < LCD_ROWS; r++) {
+        for (int c = 0; c < LCD_COLUMNS; c++) {
+            prevLcdBuffer[r][c] = ' ';
         }
     }
 }
 
 /**
- * @brief Gera uma nova peça aleatória no topo da tela.
+ * @brief Gera um novo bloco em uma coluna aleatória no topo da tela.
  */
-void spawnNewPiece() {
-    currentPiece = random(7);
-    currentRotation = random(4);
-    currentRow = -2; // Começa um pouco acima da tela para a peça "cair" para dentro
-    currentCol = random(LCD_COLUMNS - 3);
+void spawnNewBlock() {
+    screensaverBlockRow = 0;
+    screensaverBlockCol = random(LCD_COLUMNS);
 }
 
 /**
- * @brief Verifica se a peça atual na posição (r, c) colide com a grade ou limites.
- * @return true se houver colisão, false caso contrário.
- */
-bool checkCollision(int r, int c) {
-    for (int y = 0; y < 4; y++) {
-        for (int x = 0; x < 4; x++) {
-            // pgm_read_byte lê um byte da memória de programa (PROGMEM)
-            if (pgm_read_byte(&PIECES[currentPiece][currentRotation][y][x])) {
-                int gridRow = r + y;
-                int gridCol = c + x;
-                // Verifica colisão com as paredes ou com o chão
-                if (gridCol < 0 || gridCol >= LCD_COLUMNS || gridRow >= LCD_ROWS) {
-                    return true;
-                }
-                // Verifica colisão com outras peças já na grade
-                if (gridRow >= 0 && tetrisGrid[gridRow][gridCol] == (tetrisAnimationMode ? 1 : 0)) {
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
-}
-
-/**
- * @brief "Trava" a peça atual na grade do Tetris.
- */
-void lockPiece() {
-    for (int y = 0; y < 4; y++) {
-        for (int x = 0; x < 4; x++) {
-            if (pgm_read_byte(&PIECES[currentPiece][currentRotation][y][x])) {
-                int gridRow = currentRow + y;
-                int gridCol = currentCol + x;
-                if (gridRow >= 0 && gridRow < LCD_ROWS && gridCol >= 0 && gridCol < LCD_COLUMNS) {
-                    tetrisGrid[gridRow][gridCol] = tetrisAnimationMode ? 1 : 0;
-                }
-            }
-        }
-    }
-}
-
-/**
- * @brief Desenha a grade do Tetris e a peça caindo no buffer de tela `lcdBuffer`.
+ * @brief Desenha a cena do screensaver no buffer de tela `lcdBuffer`.
  * Não chama nenhuma função do LCD diretamente.
  */
-void drawTetrisToBuffer() {
-    // 1. Limpa o buffer de trabalho com o estado atual da grade "travada"
+void drawScreensaverToBuffer() {
+    // 1. Desenha os blocos que já estão "travados" na grade
     for (int r = 0; r < LCD_ROWS; r++) {
         for (int c = 0; c < LCD_COLUMNS; c++) {
             if (tetrisGrid[r][c]) {
-                lcdBuffer[r][c] = (char)0; // Caractere customizado do bloco
+                lcdBuffer[r][c] = (char)0; // Caractere de bloco
             } else {
-                lcdBuffer[r][c] = ' '; // Espaço vazio
+                lcdBuffer[r][c] = ' ';     // Espaço vazio
             }
         }
     }
 
-    // 2. Desenha a peça caindo sobre o buffer
-    for (int y = 0; y < 4; y++) {
-        for (int x = 0; x < 4; x++) {
-            if (pgm_read_byte(&PIECES[currentPiece][currentRotation][y][x])) {
-                int r = currentRow + y;
-                int c = currentCol + x;
-                if(r >= 0 && r < LCD_ROWS && c >= 0 && c < LCD_COLUMNS){
-                  // Se o modo de animação for "preencher", desenha um bloco.
-                  // Se for "limpar", desenha um espaço em branco.
-                  lcdBuffer[r][c] = (tetrisAnimationMode ? (char)0 : ' ');
-                }
-            }
-        }
+    // 2. Desenha o bloco caindo sobre o buffer
+    if (screensaverBlockRow >= 0 && screensaverBlockRow < LCD_ROWS) {
+        lcdBuffer[screensaverBlockRow][screensaverBlockCol] = (char)0;
     }
 }
 
 /**
  * @brief Compara o `lcdBuffer` com o `prevLcdBuffer` e atualiza apenas os caracteres que mudaram.
- * Esta é a função chave para evitar o flickering.
  */
 void updateLcdFromBuffer() {
     for (int r = 0; r < LCD_ROWS; r++) {
         for (int c = 0; c < LCD_COLUMNS; c++) {
-            // Se o caractere no buffer atual for diferente do que está na tela
             if (lcdBuffer[r][c] != prevLcdBuffer[r][c]) {
                 lcd.setCursor(c, r);
-                lcd.write(lcdBuffer[r][c]); // Escreve o novo caractere
-                prevLcdBuffer[r][c] = lcdBuffer[r][c]; // Atualiza o buffer de "tela"
+                lcd.write(lcdBuffer[r][c]);
+                prevLcdBuffer[r][c] = lcdBuffer[r][c];
             }
         }
     }
 }
 
+
 /**
- * @brief Executa um passo da animação do Tetris.
+ * @brief Executa um passo da animação do screensaver.
  */
-void runTetrisStep() {
-    if (millis() - tetrisLastFallTime > TETRIS_FALL_DELAY) {
-        tetrisLastFallTime = millis();
+void runScreensaverStep() {
+    if (millis() - screensaverLastFallTime > SCREENSAVER_FALL_DELAY) {
+        screensaverLastFallTime = millis();
 
-        // Tenta mover a peça para baixo
-        if (!checkCollision(currentRow + 1, currentCol)) {
-            currentRow++;
-        } else {
-            // Se colidiu, trava a peça no lugar
-            lockPiece();
+        // Verifica a colisão na próxima posição
+        bool collision = false;
+        int nextRow = screensaverBlockRow + 1;
 
-            // Verifica se a tela está cheia/vazia para trocar o modo
-            bool isScreenFull = true;
-            bool isScreenEmpty = true;
-            for(int r = 0; r < LCD_ROWS; r++) {
-                for(int c = 0; c < LCD_COLUMNS; c++) {
-                    if (tetrisGrid[r][c] == 0) isScreenFull = false;
-                    if (tetrisGrid[r][c] == 1) isScreenEmpty = false;
-                }
-            }
-
-            if ((tetrisAnimationMode && isScreenFull) || (!tetrisAnimationMode && isScreenEmpty)) {
-                tetrisAnimationMode = !tetrisAnimationMode; // Inverte o modo
-                delay(1000); // Pausa antes de começar o próximo modo
-
-                // Força uma limpeza completa da tela para a transição de modo
-                lcd.clear();
-                for (int r = 0; r < LCD_ROWS; r++) {
-                   for (int c = 0; c < LCD_COLUMNS; c++) {
-                       prevLcdBuffer[r][c] = ' ';
-                   }
-                }
-
-                resetTetrisGrid(tetrisAnimationMode);
-            }
-
-            // Gera uma nova peça
-            spawnNewPiece();
-            // Se a nova peça já colide ao ser gerada, a tela está bloqueada, então reseta.
-            if(checkCollision(currentRow, currentCol)){
-                resetTetrisGrid(tetrisAnimationMode);
-            }
+        // Colisão com o chão
+        if (nextRow >= LCD_ROWS) {
+            collision = true;
         }
-        // Lógica de desenho atualizada
-        drawTetrisToBuffer();
+        // Colisão com outro bloco
+        else if (tetrisGrid[nextRow][screensaverBlockCol] == 1) {
+            collision = true;
+        }
+
+        if (collision) {
+            // Trava o bloco na posição atual
+            if (screensaverBlockRow >= 0) {
+                tetrisGrid[screensaverBlockRow][screensaverBlockCol] = 1;
+            }
+
+            // Verifica se a pilha na coluna atual está cheia
+            if (screensaverBlockRow == 0) {
+                // Se um bloco travou na primeira linha, a pilha está cheia.
+                // Limpa a tela e recomeça.
+                delay(500); // Pequena pausa para ver a tela cheia
+                resetScreensaverGrid();
+            }
+
+            // Gera um novo bloco
+            spawnNewBlock();
+
+        } else {
+            // Move o bloco para baixo
+            screensaverBlockRow++;
+        }
+
+        // Desenha o estado atual no buffer e atualiza a tela
+        drawScreensaverToBuffer();
         updateLcdFromBuffer();
     }
 }
@@ -1342,6 +1271,7 @@ void processPhSamples() {
 
 /**
  * @brief Verifica o pH médio e decide se alguma ação de controle é necessária.
+ * Inclui a lógica de segurança para detectar falhas consecutivas da bomba.
  */
 void checkPhAndControl() {
   // Verifica se as últimas 3 médias estão estáveis
@@ -1352,22 +1282,59 @@ void checkPhAndControl() {
   maxDiff = max(diff1, max(diff2, diff3));
 
   if (maxDiff <= PH_STABILITY_THRESHOLD) {
-    // As leituras são estáveis, podemos tomar uma decisão
+    // As leituras são estáveis, podemos tomar uma decisão.
+
+    // Lógica de segurança: Se a bomba já foi usada e o pH baixou, a correção funcionou.
+    // Resetamos o contador e o erro. Isso é crucial para não disparar o alarme falsamente.
+    if (pumpActivationCount > 0 && currentPhAvg < lastPhWhenPumped) {
+        pumpActivationCount = 0;
+        solutionError = false;
+    }
+
+    // Caso 1: O pH está alto.
     if (currentPhAvg > config.phIdeal + PH_CONTROL_THRESHOLD) {
-      // pH está alto
       currentPhStatus = PH_HIGH;
-      digitalWrite(PIN_LED_LOW_PH, LOW); // Garante que o LED de pH baixo esteja desligado
-      if (!isPumpOnCooldown) {
-        activatePump();
+      digitalWrite(PIN_LED_LOW_PH, LOW);
+
+      // Se o erro de solução já foi ativado, a bomba fica bloqueada.
+      if (solutionError) {
+        return;
       }
-    } else if (currentPhAvg < config.phIdeal - PH_CONTROL_THRESHOLD) {
-      // pH está baixo
+
+      // Se a bomba não está em cooldown, podemos prosseguir.
+      if (!isPumpOnCooldown) {
+        // Lógica de segurança: Verifica se esta será a terceira tentativa sem sucesso.
+        // Se a contagem já é 2 e o pH não baixou, a próxima tentativa seria a 3ª falha.
+        if (pumpActivationCount >= 2 && currentPhAvg >= lastPhWhenPumped) {
+          solutionError = true; // Ativa o erro
+          pumpActivationCount++;  // Incrementa para 3 para registro
+          return;               // Impede a ativação da bomba
+        }
+
+        // Se não há erro, ativa a bomba de acordo com o estado atual.
+        // Com animação na tela de monitoramento, silenciosamente no screensaver.
+        if (currentState == STATE_MONITORING) {
+          activatePump();
+        } else if (currentState == STATE_SCREENSAVER) {
+          activatePumpSilently();
+        }
+      }
+    }
+    // Caso 2: O pH está baixo.
+    else if (currentPhAvg < config.phIdeal - PH_CONTROL_THRESHOLD) {
       currentPhStatus = PH_LOW;
       digitalWrite(PIN_LED_LOW_PH, HIGH);
-    } else {
-      // pH está na faixa ideal
+      // pH baixo significa que o sistema de correção não é necessário, então resetamos o contador.
+      pumpActivationCount = 0;
+      solutionError = false;
+    }
+    // Caso 3: O pH está normal.
+    else {
       currentPhStatus = PH_NORMAL;
       digitalWrite(PIN_LED_LOW_PH, LOW);
+      // pH normal significa que o sistema está estável, resetamos o contador.
+      pumpActivationCount = 0;
+      solutionError = false;
     }
   }
 }
@@ -1376,6 +1343,10 @@ void checkPhAndControl() {
  * @brief Ativa a bomba de pH Down por um período definido.
  */
 void activatePump() {
+  // Registra o pH no momento da ativação e incrementa o contador de segurança
+  lastPhWhenPumped = currentPhAvg;
+  pumpActivationCount++;
+
   // Exibe a mensagem inicial
   displayPumpActionScreen(true);
 
@@ -1413,6 +1384,29 @@ void activatePump() {
 
   // Força o redesenho da tela de monitoramento para limpar a mensagem da bomba
   screenNeedsRedraw = true;
+}
+
+/**
+ * @brief Ativa a bomba de pH Down silenciosamente, sem feedback visual.
+ * Usado quando o screensaver está ativo.
+ */
+void activatePumpSilently() {
+  // Registra o pH e incrementa o contador de segurança
+  lastPhWhenPumped = currentPhAvg;
+  pumpActivationCount++;
+
+  // Ativa a bomba pela duração configurada
+  digitalWrite(PIN_MOSFET_PUMP, HIGH);
+  delay(config.pumpDurationMs);
+  wdt_reset(); // Reseta o watchdog após o delay
+  digitalWrite(PIN_MOSFET_PUMP, LOW);
+
+  // Inicia o período de cooldown
+  isPumpOnCooldown = true;
+  pumpCooldownStartTime = millis();
+
+  // Reseta o histórico de pH para evitar ações com dados antigos
+  for(int i=0; i<3; i++) stablePhHistory[i] = config.phIdeal;
 }
 
 
@@ -1493,30 +1487,36 @@ void updateMonitoringValues() {
   const char spinner[] = "|/-\\";
   static PhStatus lastPhStatus = PH_NORMAL; // Para rastrear a mudança de estado
 
-  // A tela precisa ser redesenhada se o estado do pH mudou ou se voltamos de outro menu.
-  if (screenNeedsRedraw || currentPhStatus != lastPhStatus) {
+  // Se o erro de solução estiver ativo, ele tem prioridade máxima na exibição da linha 0.
+  if (solutionError) {
     lcd.setCursor(0, 0);
-    switch (currentPhStatus) {
-      case PH_LOW:
-        // Mensagem para pH baixo, com espaço inicial e preenchimento para limpar a linha.
-        lcd.print(F(" PH ATUAL < IDEAL   "));
-        break;
-      case PH_HIGH:
-        // Mensagem para pH alto (bomba trabalhando), com espaço inicial e preenchimento.
-        lcd.print(F(" AJUSTANDO PH       "));
-        break;
-      case PH_NORMAL:
-      default:
-        // Mensagem padrão, com espaço inicial e preenchimento.
-        lcd.print(F(" MONITORANDO        "));
-        break;
+    lcd.print(F("VERIFICAR SOLUCAO PH")); // Mensagem de 20 caracteres
+  } else {
+    // A tela precisa ser redesenhada se o estado do pH mudou ou se voltamos de outro menu.
+    if (screenNeedsRedraw || currentPhStatus != lastPhStatus) {
+      lcd.setCursor(0, 0);
+      switch (currentPhStatus) {
+        case PH_LOW:
+          // Mensagem para pH baixo, com espaço inicial e preenchimento para limpar a linha.
+          lcd.print(F(" PH ATUAL < IDEAL   "));
+          break;
+        case PH_HIGH:
+          // Mensagem para pH alto (bomba trabalhando), com espaço inicial e preenchimento.
+          lcd.print(F(" AJUSTANDO PH       "));
+          break;
+        case PH_NORMAL:
+        default:
+          // Mensagem padrão, com espaço inicial e preenchimento.
+          lcd.print(F(" MONITORANDO        "));
+          break;
+      }
     }
-  }
 
-  // Anima o spinner em uma posição fixa no final da linha para consistência visual.
-  lcd.setCursor(19, 0);
-  lcd.print(spinner[spinnerPos]);
-  spinnerPos = (spinnerPos + 1) % 4;
+    // Anima o spinner em uma posição fixa no final da linha para consistência visual.
+    lcd.setCursor(19, 0);
+    lcd.print(spinner[spinnerPos]);
+    spinnerPos = (spinnerPos + 1) % 4;
+  }
 
   lastPhStatus = currentPhStatus; // Salva o estado atual para a próxima verificação
 
