@@ -2,7 +2,7 @@
  * Controlador de PH Automático para Cultivo
  *
  * Autor: Jules (Assistente de IA)
- * Versão: 1.8.4
+ * Versão: 1.8.5
  * Data: 2025-10-08
  *
  * Descrição:
@@ -167,6 +167,7 @@ unsigned long pumpCooldownStartTime = 0; // 'millis()' de quando o cooldown da b
 int pumpActivationCount = 0;          // Contador para ativações consecutivas da bomba sem efeito no pH
 bool solutionError = false;           // Flag para o erro de falta de solução de pH
 float lastPhWhenPumped = 0.0;         // Armazena o valor de pH na última ativação da bomba
+float phAtFirstPump = 0.0;            // Armazena o pH no início do ciclo de correção
 bool isSilentPumpActive = false;      // Flag para a bomba silenciosa (screensaver)
 unsigned long silentPumpStartTime = 0; // 'millis()' de quando a bomba silenciosa começou
 
@@ -1297,10 +1298,9 @@ void checkPhAndControl() {
   if (maxDiff <= PH_STABILITY_THRESHOLD) {
     // As leituras são estáveis, podemos tomar uma decisão.
 
-    // Lógica de segurança: Se a bomba já foi usada e o pH baixou o suficiente, a correção funcionou.
-    // Resetamos o contador e o erro. Isso evita que o ruído do sensor seja interpretado como uma correção.
-    if (pumpActivationCount > 0 && (lastPhWhenPumped - currentPhAvg) >= PH_CHANGE_TOLERANCE) {
-        pumpActivationCount = 0;
+    // Lógica de segurança: Se um ciclo de correção está ativo e o pH baixou 0.1 ou mais desde o início, a correção funcionou.
+    if (pumpActivationCount > 0 && (phAtFirstPump - currentPhAvg) >= 0.1) {
+        pumpActivationCount = 0; // Reinicia o contador de falhas.
         solutionError = false;
     }
 
@@ -1316,11 +1316,10 @@ void checkPhAndControl() {
 
       // Se a bomba não está em cooldown, podemos prosseguir.
       if (!isPumpOnCooldown) {
-        // Lógica de segurança: Após 2 ativações consecutivas sem alteração no pH,
-        // aciona o erro e bloqueia novas ativações.
-        if (pumpActivationCount >= 2 && currentPhAvg >= lastPhWhenPumped) {
+        // Lógica de segurança: Após 2 ativações consecutivas sem uma queda de pH de pelo menos 0.1
+        // em relação ao início do ciclo, aciona o erro.
+        if (pumpActivationCount >= 2 && (phAtFirstPump - currentPhAvg) < 0.1) {
           solutionError = true; // Ativa o erro
-          pumpActivationCount++;  // Incrementa para registrar a falha e manter o bloqueio
           return;               // Impede a ativação da bomba
         }
 
@@ -1356,6 +1355,10 @@ void checkPhAndControl() {
  * @brief Ativa a bomba de pH Down por um período definido.
  */
 void activatePump() {
+  // Se for a primeira ativação do ciclo, guarda o pH inicial para comparação futura.
+  if (pumpActivationCount == 0) {
+    phAtFirstPump = currentPhAvg;
+  }
   // Registra o pH no momento da ativação e incrementa o contador de segurança
   lastPhWhenPumped = currentPhAvg;
   pumpActivationCount++;
@@ -1404,6 +1407,10 @@ void activatePump() {
  * Usado quando o screensaver está ativo. A bomba é desligada no loop principal.
  */
 void activatePumpSilently() {
+  // Se for a primeira ativação do ciclo, guarda o pH inicial para comparação futura.
+  if (pumpActivationCount == 0) {
+    phAtFirstPump = currentPhAvg;
+  }
   // Registra o pH e incrementa o contador de segurança
   lastPhWhenPumped = currentPhAvg;
   pumpActivationCount++;
