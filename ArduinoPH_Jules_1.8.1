@@ -2,7 +2,7 @@
  * Controlador de PH Automático para Cultivo
  *
  * Autor: Jules (Assistente de IA)
- * Versão: 1.8.5
+ * Versão: 1.8.6
  * Data: 2025-10-08
  *
  * Descrição:
@@ -171,6 +171,10 @@ float phAtFirstPump = 0.0;            // Armazena o pH no início do ciclo de co
 bool isSilentPumpActive = false;      // Flag para a bomba silenciosa (screensaver)
 unsigned long silentPumpStartTime = 0; // 'millis()' de quando a bomba silenciosa começou
 
+// Variáveis para o LED de alerta piscante
+unsigned long lastLedBlinkTime = 0;
+bool ledBlinkState = false;
+
 // Variáveis de estado dos botões
 int btnMenuState, btnUpState, btnDownState;
 int lastBtnMenuState = HIGH, lastBtnUpState = HIGH, lastBtnDownState = HIGH;
@@ -304,6 +308,14 @@ void loop() {
     }
   }
 
+  // Lógica para piscar o LED de alerta quando houver um erro de solução.
+  if (solutionError) {
+    if (millis() - lastLedBlinkTime > 500) { // 500ms blink interval
+      lastLedBlinkTime = millis();
+      ledBlinkState = !ledBlinkState;
+      digitalWrite(PIN_LED_LOW_PH, ledBlinkState);
+    }
+  }
 
   // --- Máquina de Estados ---
   // O 'switch' direciona a execução para a função que gerencia o estado atual do sistema.
@@ -1309,18 +1321,12 @@ void checkPhAndControl() {
       currentPhStatus = PH_HIGH;
       digitalWrite(PIN_LED_LOW_PH, LOW);
 
-      // Se o erro de solução já foi ativado, a bomba fica bloqueada.
-      if (solutionError) {
-        return;
-      }
-
       // Se a bomba não está em cooldown, podemos prosseguir.
       if (!isPumpOnCooldown) {
         // Lógica de segurança: Após 2 ativações consecutivas sem uma queda de pH de pelo menos 0.1
         // em relação ao início do ciclo, aciona o erro.
         if (pumpActivationCount >= 2 && (phAtFirstPump - currentPhAvg) < 0.1) {
-          solutionError = true; // Ativa o erro
-          return;               // Impede a ativação da bomba
+          solutionError = true; // Ativa o erro, mas não impede a bomba.
         }
 
         // Se não há erro, ativa a bomba de acordo com o estado atual.
