@@ -42,7 +42,7 @@ Esta é a tela que você verá a maior parte do tempo. Ela te dá um resumo comp
 
 ## 2. O Menu Inicial: A Encruzilhada
 
-Ao ligar seu ALEPH, você verá este menu. É o seu ponto de partida para todas as aventuras.
+Ao pressionar [MENU] na Tela Principal do seu ALEPH, você verá este menu. É o seu ponto de partida para todas as aventuras.
 
 - **> Monitorar:** Selecione para ir para a Tela Principal e ver o status do seu sistema.
 - **Calibrar Sonda:** Essencial! Faça isso antes do primeiro uso e sempre que trocar a sonda.
@@ -102,7 +102,7 @@ Seu ALEPH é inteligente e te avisará se algo estiver errado. Fique de olho na 
 
 - **`PH ATUAL < IDEAL` (LED Aceso Contínuo):**
   - **O que significa?** O pH está abaixo do ideal.
-  - **O que fazer?** Apenas um aviso. O ALEPH não corrige o pH para cima, então ele está apenas te informando da condição.
+  - **O que fazer?** Apenas um aviso. O ALEPH não corrige o pH para cima, então ele está apenas te informando da condição. O pH da solução deve ser elevado manualmente.
 
 ---
 
