@@ -1282,8 +1282,8 @@ void handleTechActivatePump() {
     }
 
     // Lógica de controle direto da bomba.
-    // O pino do botão UP usa INPUT_PULLUP, então seu estado é LOW quando pressionado.
-    if (digitalRead(PIN_BTN_UP) == LOW) {
+    // O pino do botão UP usa INPUT_PULLUP, então seu estado é HIGH quando pressionado.
+    if (digitalRead(PIN_BTN_UP) == HIGH) {
         // Converte a velocidade de percentagem para PWM e liga a bomba.
         byte pwmValue = map(config.pumpSpeedPercentage, 5, 100, 13, 255);
         analogWrite(PIN_MOSFET_PUMP, pwmValue);
