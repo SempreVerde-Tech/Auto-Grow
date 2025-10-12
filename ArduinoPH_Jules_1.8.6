@@ -2,8 +2,8 @@
  * Controlador de PH Automático para Cultivo
  *
  * Autor: Jules (Assistente de IA)
- * Versão: 1.8.1
- * Data: 2024-07-25
+ * Versão: 1.8.6
+ * Data: 2025-10-08
  *
  * Descrição:
  * Este código implementa um sistema de controle de pH automatizado para soluções de rega em cultivos.
@@ -71,6 +71,7 @@ const int BUTTON_DEBOUNCE_DELAY = 50; // Tempo em milissegundos para evitar leit
 const float PH_IDEAL_DEFAULT = 7.0;             // Valor padrão para o pH ideal
 const float PH_CONTROL_THRESHOLD = 0.3;         // Variação de pH que inicia uma checagem de controle
 const float PH_STABILITY_THRESHOLD = 0.1;       // Variação máxima entre médias para considerar a leitura estável
+const float PH_CHANGE_TOLERANCE = 0.05;         // Tolerância para considerar a mudança de pH real após a dosagem
 const unsigned long PUMP_DURATION_MS_DEFAULT = 1000; // Duração padrão que a bomba fica ligada (1s)
 const unsigned long PUMP_COOLDOWN_MS = 300000;  // Tempo de espera (5 minutos) antes de acionar a bomba novamente
 
@@ -166,6 +167,13 @@ unsigned long pumpCooldownStartTime = 0; // 'millis()' de quando o cooldown da b
 int pumpActivationCount = 0;          // Contador para ativações consecutivas da bomba sem efeito no pH
 bool solutionError = false;           // Flag para o erro de falta de solução de pH
 float lastPhWhenPumped = 0.0;         // Armazena o valor de pH na última ativação da bomba
+float phAtFirstPump = 0.0;            // Armazena o pH no início do ciclo de correção
+bool isSilentPumpActive = false;      // Flag para a bomba silenciosa (screensaver)
+unsigned long silentPumpStartTime = 0; // 'millis()' de quando a bomba silenciosa começou
+
+// Variáveis para o LED de alerta piscante
+unsigned long lastLedBlinkTime = 0;
+bool ledBlinkState = false;
 
 // Variáveis de estado dos botões
 int btnMenuState, btnUpState, btnDownState;
@@ -287,8 +295,27 @@ void loop() {
     if (isPumpOnCooldown && (millis() - pumpCooldownStartTime >= PUMP_COOLDOWN_MS)) {
       isPumpOnCooldown = false;
     }
+
+    // Lógica para desligar a bomba silenciosa (não-bloqueante)
+    if (isSilentPumpActive && (millis() - silentPumpStartTime >= config.pumpDurationMs)) {
+      digitalWrite(PIN_MOSFET_PUMP, LOW); // DESLIGA a bomba
+      isSilentPumpActive = false;
+
+      // Inicia o período de cooldown e reseta o histórico, assim como a bomba normal
+      isPumpOnCooldown = true;
+      pumpCooldownStartTime = millis();
+      for(int i=0; i<3; i++) stablePhHistory[i] = config.phIdeal;
+    }
   }
 
+  // Lógica para piscar o LED de alerta quando houver um erro de solução.
+  if (solutionError) {
+    if (millis() - lastLedBlinkTime > 500) { // 500ms blink interval
+      lastLedBlinkTime = millis();
+      ledBlinkState = !ledBlinkState;
+      digitalWrite(PIN_LED_LOW_PH, ledBlinkState);
+    }
+  }
 
   // --- Máquina de Estados ---
   // O 'switch' direciona a execução para a função que gerencia o estado atual do sistema.
@@ -433,7 +460,7 @@ void readSensors() {
     currentPhInst = convertVoltageToPh(voltage, currentTemperature);
 
     // Armazena a amostra para o cálculo da média
-    if (currentState == STATE_MONITORING && sampleCount < NUM_SAMPLES) {
+    if ((currentState == STATE_MONITORING || currentState == STATE_SCREENSAVER) && sampleCount < NUM_SAMPLES) {
       phSamples[sampleCount] = currentPhInst;
       sampleCount++;
     }
@@ -506,9 +533,8 @@ void handleMonitoring() {
  * Executa a animação e verifica se um botão foi pressionado para sair.
  */
 void handleScreensaver() {
-    // Sai do screensaver se um botão for pressionado ou se houver um erro crítico de solução.
-    // O screensaver continua durante a correção normal de pH.
-    if (btnMenuPressed || btnUpPressed || btnDownPressed || solutionError) {
+    // Sai do screensaver se um botão for pressionado, se houver um erro crítico ou qualquer alerta de pH.
+    if (btnMenuPressed || btnUpPressed || btnDownPressed || solutionError || currentPhStatus != PH_NORMAL) {
         currentState = STATE_MONITORING;
         screenNeedsRedraw = true; // Força o redesenho completo da tela de monitoramento.
         return;
@@ -1284,10 +1310,9 @@ void checkPhAndControl() {
   if (maxDiff <= PH_STABILITY_THRESHOLD) {
     // As leituras são estáveis, podemos tomar uma decisão.
 
-    // Lógica de segurança: Se a bomba já foi usada e o pH baixou, a correção funcionou.
-    // Resetamos o contador e o erro. Isso é crucial para não disparar o alarme falsamente.
-    if (pumpActivationCount > 0 && currentPhAvg < lastPhWhenPumped) {
-        pumpActivationCount = 0;
+    // Lógica de segurança: Se um ciclo de correção está ativo e o pH baixou 0.1 ou mais desde o início, a correção funcionou.
+    if (pumpActivationCount > 0 && (phAtFirstPump - currentPhAvg) >= 0.1) {
+        pumpActivationCount = 0; // Reinicia o contador de falhas.
         solutionError = false;
     }
 
@@ -1296,19 +1321,12 @@ void checkPhAndControl() {
       currentPhStatus = PH_HIGH;
       digitalWrite(PIN_LED_LOW_PH, LOW);
 
-      // Se o erro de solução já foi ativado, a bomba fica bloqueada.
-      if (solutionError) {
-        return;
-      }
-
       // Se a bomba não está em cooldown, podemos prosseguir.
       if (!isPumpOnCooldown) {
-        // Lógica de segurança: Verifica se esta será a terceira tentativa sem sucesso.
-        // Se a contagem já é 2 e o pH não baixou, a próxima tentativa seria a 3ª falha.
-        if (pumpActivationCount >= 2 && currentPhAvg >= lastPhWhenPumped) {
-          solutionError = true; // Ativa o erro
-          pumpActivationCount++;  // Incrementa para 3 para registro
-          return;               // Impede a ativação da bomba
+        // Lógica de segurança: Após 2 ativações consecutivas sem uma queda de pH de pelo menos 0.1
+        // em relação ao início do ciclo, aciona o erro.
+        if (pumpActivationCount >= 2 && (phAtFirstPump - currentPhAvg) < 0.1) {
+          solutionError = true; // Ativa o erro, mas não impede a bomba.
         }
 
         // Se não há erro, ativa a bomba de acordo com o estado atual.
@@ -1343,6 +1361,10 @@ void checkPhAndControl() {
  * @brief Ativa a bomba de pH Down por um período definido.
  */
 void activatePump() {
+  // Se for a primeira ativação do ciclo, guarda o pH inicial para comparação futura.
+  if (pumpActivationCount == 0) {
+    phAtFirstPump = currentPhAvg;
+  }
   // Registra o pH no momento da ativação e incrementa o contador de segurança
   lastPhWhenPumped = currentPhAvg;
   pumpActivationCount++;
@@ -1387,26 +1409,24 @@ void activatePump() {
 }
 
 /**
- * @brief Ativa a bomba de pH Down silenciosamente, sem feedback visual.
- * Usado quando o screensaver está ativo.
+ * @brief Ativa a bomba de pH Down silenciosamente, sem feedback visual (não-bloqueante).
+ * Usado quando o screensaver está ativo. A bomba é desligada no loop principal.
  */
 void activatePumpSilently() {
+  // Se for a primeira ativação do ciclo, guarda o pH inicial para comparação futura.
+  if (pumpActivationCount == 0) {
+    phAtFirstPump = currentPhAvg;
+  }
   // Registra o pH e incrementa o contador de segurança
   lastPhWhenPumped = currentPhAvg;
   pumpActivationCount++;
 
-  // Ativa a bomba pela duração configurada
-  digitalWrite(PIN_MOSFET_PUMP, HIGH);
-  delay(config.pumpDurationMs);
-  wdt_reset(); // Reseta o watchdog após o delay
-  digitalWrite(PIN_MOSFET_PUMP, LOW);
+  // Ativa a bomba e os flags de controle
+  digitalWrite(PIN_MOSFET_PUMP, HIGH); // LIGA a bomba
+  isSilentPumpActive = true;
+  silentPumpStartTime = millis();
 
-  // Inicia o período de cooldown
-  isPumpOnCooldown = true;
-  pumpCooldownStartTime = millis();
-
-  // Reseta o histórico de pH para evitar ações com dados antigos
-  for(int i=0; i<3; i++) stablePhHistory[i] = config.phIdeal;
+  // O cooldown e o reset do histórico serão iniciados quando a bomba for desligada no loop principal.
 }
 
 
