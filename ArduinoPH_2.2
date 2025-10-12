@@ -2,7 +2,7 @@
  * Controlador de PH Automático para Cultivo
  *
  * Autor: Rafael Galvani e Jules
- * Versão: 2.1
+ * Versão: 2.2
  * Data: 2025-10-12
  *
  * Descrição:
@@ -1431,22 +1431,16 @@ void handleTechRestartConfirm() {
 
 /**
  * @brief Processa as amostras de pH coletadas, calcula a média e armazena no histórico.
+ *        Também verifica se a leitura do pH está fora da faixa válida para acionar um alerta.
  */
 void processPhSamples() {
-  // Ordena as amostras para facilitar a análise
+  // Ordena as amostras para poder descartar os valores mais altos e mais baixos,
+  // o que ajuda a eliminar leituras espúrias e a estabilizar o valor médio.
   sort(phSamples, NUM_SAMPLES);
 
-  // Lógica para checar se todas as amostras são idênticas.
-  // Após a ordenação, basta comparar a primeira com a última.
-  // Isso indica um problema na sonda (ex: desconectada ou travada).
-  // Usamos uma pequena tolerância para a comparação de floats.
-  bool allSamplesIdentical = false;
-  if (abs(phSamples[0] - phSamples[NUM_SAMPLES - 1]) < 0.01) { // Tolerância de 0.01 pH
-      allSamplesIdentical = true;
-  }
-
   float sum = 0;
-  // Soma os valores centrais, ignorando os extremos
+  // Soma os valores centrais, ignorando os extremos (os 2 menores e os 2 maiores).
+  // Isso cria uma média mais robusta e menos suscetível a ruídos momentâneos.
   for (int i = NUM_SAMPLES_TO_DISCARD; i < NUM_SAMPLES - NUM_SAMPLES_TO_DISCARD; i++) {
     sum += phSamples[i];
   }
@@ -1455,15 +1449,16 @@ void processPhSamples() {
   currentPhAvg = sum / numSamplesForAvg;
 
   // --- Lógica de Verificação do Erro da Sonda ---
-  // Se a média de pH está fora da faixa química (0-14) ou se todas as
-  // leituras foram idênticas, ativamos o flag de erro da sonda.
-  if (currentPhAvg < 0.0 || currentPhAvg > 14.0 || allSamplesIdentical) {
+  // O alerta "CHECAR SONDA" agora é acionado *apenas* se a média de pH calculada
+  // estiver fora da faixa quimicamente possível (0 a 14). A verificação de
+  // amostras idênticas foi removida conforme solicitado pelo usuário.
+  if (currentPhAvg < 0.0 || currentPhAvg > 14.0) {
     probeError = true;
   } else {
-    probeError = false; // Limpa o erro se as leituras voltarem ao normal.
+    probeError = false; // Limpa o erro se as leituras voltarem a uma faixa válida.
   }
 
-  // Armazena a nova média no histórico circular
+  // Armazena a nova média no histórico circular para análise de estabilidade posterior.
   stablePhHistory[stablePhHistoryIndex] = currentPhAvg;
   stablePhHistoryIndex = (stablePhHistoryIndex + 1) % 3;
 }
