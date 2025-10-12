@@ -2,8 +2,8 @@
  * Controlador de PH Automático para Cultivo
  *
  * Autor: Jules (Assistente de IA)
- * Versão: 1.8.6
- * Data: 2025-10-08
+ * Versão: 1.9
+ * Data: 2025-10-12
  *
  * Descrição:
  * Este código implementa um sistema de controle de pH automatizado para soluções de rega em cultivos.
@@ -73,7 +73,6 @@ const float PH_CONTROL_THRESHOLD = 0.3;         // Variação de pH que inicia u
 const float PH_STABILITY_THRESHOLD = 0.1;       // Variação máxima entre médias para considerar a leitura estável
 const float PH_CHANGE_TOLERANCE = 0.05;         // Tolerância para considerar a mudança de pH real após a dosagem
 const unsigned long PUMP_DURATION_MS_DEFAULT = 1000; // Duração padrão que a bomba fica ligada (1s)
-const unsigned long PUMP_COOLDOWN_MS = 300000;  // Tempo de espera (5 minutos) antes de acionar a bomba novamente
 
 // --- Configurações de Leitura e Calibragem ---
 const int NUM_SAMPLES = 15;                     // Número de amostras para calcular a média de pH
@@ -109,6 +108,7 @@ struct SystemConfig {
   float calibSlope;             // Inclinação da curva de pH (calculada na calibragem de 2 pontos)
   bool isCalibrated2Points;     // Flag para saber se a calibragem de 2 pontos foi feita
   unsigned long pumpDurationMs; // Duração que a bomba fica ligada (em milissegundos)
+  unsigned int pumpCooldownMinutes; // Tempo de espera (em minutos) entre ativações da bomba
 };
 
 SystemConfig config; // Variável global que conterá todas as configurações do sistema
@@ -133,7 +133,8 @@ enum SystemState {
   STATE_TECH_RAW_VALUES,
   STATE_TECH_CHECK_SENSORS,
   STATE_TECH_ACTIVATE_PUMP,
-  STATE_TECH_SET_PUMP_TIMER, // Novo estado para ajustar o tempo da bomba
+  STATE_TECH_SET_PUMP_TIMER,
+  STATE_TECH_SET_COOLDOWN,  // Novo estado para ajustar o cooldown da bomba
   STATE_TECH_RESTART_CONFIRM
 };
 
@@ -185,6 +186,7 @@ bool btnMenuPressed = false, btnUpPressed = false, btnDownPressed = false;
 unsigned long lastActivityTime = 0;   // 'millis()' da última interação do usuário com o menu
 float tempPhIdeal;                    // Valor temporário ao ajustar o pH ideal
 unsigned long tempPumpDurationMs;     // Valor temporário ao ajustar o timer da bomba
+unsigned int tempPumpCooldownMinutes; // Valor temporário ao ajustar o cooldown
 int menuCursor = 0;                   // Posição do cursor nos menus
 bool screenNeedsRedraw = true;        // Flag para controlar a atualização da tela e evitar flickering
 
@@ -291,8 +293,8 @@ void loop() {
       sampleCount = 0; // Reseta para a próxima rodada de amostragem
     }
 
-    // Verifica se a bomba está em cooldown
-    if (isPumpOnCooldown && (millis() - pumpCooldownStartTime >= PUMP_COOLDOWN_MS)) {
+    // Verifica se a bomba está em cooldown, usando o valor configurado
+    if (isPumpOnCooldown && (millis() - pumpCooldownStartTime >= (config.pumpCooldownMinutes * 60000UL))) {
       isPumpOnCooldown = false;
     }
 
@@ -373,6 +375,9 @@ void loop() {
         break;
     case STATE_TECH_SET_PUMP_TIMER:
         handleSetPumpTimer();
+        break;
+    case STATE_TECH_SET_COOLDOWN:
+        handleSetCooldown();
         break;
     case STATE_TECH_RESTART_CONFIRM:
       handleTechRestartConfirm();
@@ -1062,7 +1067,7 @@ void handleTechMenu() {
         screenNeedsRedraw = true;
         return;
     }
-    const int numOptions = 6; // Agora são 6 opções no menu
+    const int numOptions = 7; // Agora são 7 opções no menu
     if (btnUpPressed) {
         menuCursor = (menuCursor > 0) ? menuCursor - 1 : numOptions - 1;
         screenNeedsRedraw = true;
@@ -1087,11 +1092,15 @@ void handleTechMenu() {
                 tempPumpDurationMs = config.pumpDurationMs; // Carrega o valor atual para edição
                 currentState = STATE_TECH_SET_PUMP_TIMER;
                 break;
-            case 4: // Reiniciar
+            case 4: // Cooldown Bomba
+                tempPumpCooldownMinutes = config.pumpCooldownMinutes; // Carrega o valor atual para edição
+                currentState = STATE_TECH_SET_COOLDOWN;
+                break;
+            case 5: // Reiniciar
                 currentState = STATE_TECH_RESTART_CONFIRM;
                 menuCursor = 1; // Padrão em "NÃO"
                 break;
-            case 5: // Voltar
+            case 6: // Voltar
                 currentState = STATE_MAIN_MENU;
                 menuCursor = 2; // Volta para a opção "Menu Tecnico"
                 break;
@@ -1235,6 +1244,52 @@ void handleSetPumpTimer() {
         displaySuccessMessage("  TIMER SALVO!  ");
         currentState = STATE_TECH_MENU;
         menuCursor = 3;
+        screenNeedsRedraw = true;
+    }
+}
+
+/**
+ * @brief Gerencia a tela de ajuste do cooldown da bomba.
+ */
+void handleSetCooldown() {
+    if (screenNeedsRedraw) {
+        // A variável tempPumpCooldownMinutes já foi carregada no handleTechMenu
+        displaySetCooldown();
+        screenNeedsRedraw = false;
+    }
+
+    // Timeout de inatividade
+    if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+        currentState = STATE_TECH_MENU;
+        menuCursor = 4; // Volta para a opção "Cooldown"
+        screenNeedsRedraw = true;
+        return;
+    }
+
+    // Lógica dos botões
+    if (btnUpPressed) {
+        tempPumpCooldownMinutes++;
+        screenNeedsRedraw = true;
+    }
+    if (btnDownPressed) {
+        tempPumpCooldownMinutes--;
+        screenNeedsRedraw = true;
+    }
+
+    // Limita o valor entre 1 e 60 minutos
+    if (tempPumpCooldownMinutes > 60) {
+        tempPumpCooldownMinutes = 60;
+    }
+    if (tempPumpCooldownMinutes < 1) {
+        tempPumpCooldownMinutes = 1;
+    }
+
+    if (btnMenuPressed) {
+        config.pumpCooldownMinutes = tempPumpCooldownMinutes;
+        saveConfigToEEPROM();
+        displaySuccessMessage(" COOLDOWN SALVO! ");
+        currentState = STATE_TECH_MENU;
+        menuCursor = 4; // Volta para a opção "Cooldown"
         screenNeedsRedraw = true;
     }
 }
@@ -1695,8 +1750,8 @@ void displayTechMenu() {
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print(F("    MENU TECNICO    "));
-    const char* options[] = {"Valores Brutos", "Checar Sensores", "Ativar Bomba", "Timer Bomba", "Reiniciar", "Voltar"};
-    const int numOptions = 6;
+    const char* options[] = {"Valores Brutos", "Checar Sensores", "Ativar Bomba", "Timer Bomba", "Cooldown", "Reiniciar", "Voltar"};
+    const int numOptions = 7;
 
     // Lógica de rolagem para exibir 3 itens em uma tela com 1 linha de título
     int displayOffset = 0;
@@ -1729,6 +1784,21 @@ void displaySetPumpTimer() {
     // Converte de milissegundos para segundos para exibição
     lcd.print((float)tempPumpDurationMs / 1000.0, 1);
     lcd.print("s");
+    lcd.setCursor(0, 3);
+    lcd.print(F("MENU para Salvar"));
+}
+
+/**
+ * @brief Desenha a tela de ajuste do cooldown da bomba.
+ */
+void displaySetCooldown() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("  AJUSTAR COOLDOWN  "));
+    lcd.setCursor(0, 2);
+    lcd.print(F("   Tempo: "));
+    lcd.print(tempPumpCooldownMinutes);
+    lcd.print(" min  ");
     lcd.setCursor(0, 3);
     lcd.print(F("MENU para Salvar"));
 }
@@ -1798,6 +1868,11 @@ void loadConfigFromEEPROM() {
     if (config.pumpDurationMs == 0 || config.pumpDurationMs > 60000) { // Maior que 1 minuto é irreal
         config.pumpDurationMs = PUMP_DURATION_MS_DEFAULT;
     }
+    // Verificação de segurança para o novo valor de cooldown. Se for um valor inválido (0 ou muito grande),
+    // define o padrão de 5 minutos. Isso garante a compatibilidade com versões antigas da EEPROM.
+    if (config.pumpCooldownMinutes < 1 || config.pumpCooldownMinutes > 60) {
+        config.pumpCooldownMinutes = 5; // Padrão de 5 minutos
+    }
   } else {
     // EEPROM não inicializada ou dados corrompidos, usa valores padrão
     config.phIdeal = PH_IDEAL_DEFAULT;
@@ -1806,6 +1881,7 @@ void loadConfigFromEEPROM() {
     config.calibSlope = -0.05916;
     config.isCalibrated2Points = false;
     config.pumpDurationMs = PUMP_DURATION_MS_DEFAULT; // Define o padrão para o novo campo
+    config.pumpCooldownMinutes = 5; // Padrão de 5 minutos
     saveConfigToEEPROM(); // Salva os padrões para a próxima inicialização
   }
 }
