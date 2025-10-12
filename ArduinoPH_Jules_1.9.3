@@ -2,7 +2,7 @@
  * Controlador de PH Automático para Cultivo
  *
  * Autor: Jules (Assistente de IA)
- * Versão: 1.9
+ * Versão: 1.9.3
  * Data: 2025-10-12
  *
  * Descrição:
@@ -167,6 +167,7 @@ bool isPumpOnCooldown = false;        // Flag para indicar se a bomba está no p
 unsigned long pumpCooldownStartTime = 0; // 'millis()' de quando o cooldown da bomba começou
 int pumpActivationCount = 0;          // Contador para ativações consecutivas da bomba sem efeito no pH
 bool solutionError = false;           // Flag para o erro de falta de solução de pH
+bool probeError = false;              // Flag para o erro da sonda (leituras inválidas ou idênticas)
 float lastPhWhenPumped = 0.0;         // Armazena o valor de pH na última ativação da bomba
 float phAtFirstPump = 0.0;            // Armazena o pH no início do ciclo de correção
 bool isSilentPumpActive = false;      // Flag para a bomba silenciosa (screensaver)
@@ -310,15 +311,6 @@ void loop() {
     }
   }
 
-  // Lógica para piscar o LED de alerta quando houver um erro de solução.
-  if (solutionError) {
-    if (millis() - lastLedBlinkTime > 500) { // 500ms blink interval
-      lastLedBlinkTime = millis();
-      ledBlinkState = !ledBlinkState;
-      digitalWrite(PIN_LED_LOW_PH, ledBlinkState);
-    }
-  }
-
   // --- Máquina de Estados ---
   // O 'switch' direciona a execução para a função que gerencia o estado atual do sistema.
   switch (currentState) {
@@ -386,6 +378,31 @@ void loop() {
 
   // Reseta os flags dos botões após terem sido processados no estado atual
   resetButtonFlags();
+
+  // --- Lógica Centralizada de Controle do LED de Alerta ---
+  // Esta seção gerencia o comportamento do LED com base no estado do sistema.
+  // A prioridade é: Erro Crítico (piscando) > pH Baixo (aceso) > Normal (apagado).
+
+  // 1. Verifica se há um erro crítico (sonda ou solução).
+  if (probeError || solutionError) {
+    // Lógica para piscar o LED em intervalos de 500ms.
+    if (millis() - lastLedBlinkTime > 500) {
+      lastLedBlinkTime = millis();
+      ledBlinkState = !ledBlinkState;
+      digitalWrite(PIN_LED_LOW_PH, ledBlinkState);
+    }
+  }
+  // 2. Se não há erros, verifica o status do pH.
+  else {
+    // Liga o LED de forma contínua se o pH estiver baixo.
+    if (currentPhStatus == PH_LOW) {
+      digitalWrite(PIN_LED_LOW_PH, HIGH);
+    }
+    // Desliga o LED para qualquer outro estado (Normal ou Alto).
+    else {
+      digitalWrite(PIN_LED_LOW_PH, LOW);
+    }
+  }
 }
 
 // =====================================================================================================================
@@ -526,8 +543,8 @@ void handleMonitoring() {
     return; // Sai da função para evitar que o screensaver seja ativado na mesma iteração
   }
 
-  // Verifica o timeout para o screensaver. O screensaver não deve ser ativado se houver um erro crítico de solução.
-  if (!solutionError && (millis() - lastActivityTime > SCREENSAVER_TIMEOUT_MS)) {
+  // Verifica o timeout para o screensaver. O screensaver não deve ser ativado se houver um erro crítico.
+  if (!solutionError && !probeError && (millis() - lastActivityTime > SCREENSAVER_TIMEOUT_MS)) {
       currentState = STATE_SCREENSAVER;
       screenNeedsRedraw = true;
   }
@@ -538,8 +555,8 @@ void handleMonitoring() {
  * Executa a animação e verifica se um botão foi pressionado para sair.
  */
 void handleScreensaver() {
-    // Sai do screensaver se um botão for pressionado, se houver um erro crítico ou qualquer alerta de pH.
-    if (btnMenuPressed || btnUpPressed || btnDownPressed || solutionError || currentPhStatus != PH_NORMAL) {
+    // Sai do screensaver se um botão for pressionado ou se houver qualquer alerta crítico (solução ou sonda).
+    if (btnMenuPressed || btnUpPressed || btnDownPressed || solutionError || probeError || currentPhStatus != PH_NORMAL) {
         currentState = STATE_MONITORING;
         screenNeedsRedraw = true; // Força o redesenho completo da tela de monitoramento.
         return;
@@ -1333,8 +1350,17 @@ void handleTechRestartConfirm() {
  * @brief Processa as amostras de pH coletadas, calcula a média e armazena no histórico.
  */
 void processPhSamples() {
-  // Ordena as amostras para facilitar o descarte dos extremos
+  // Ordena as amostras para facilitar a análise
   sort(phSamples, NUM_SAMPLES);
+
+  // Lógica para checar se todas as amostras são idênticas.
+  // Após a ordenação, basta comparar a primeira com a última.
+  // Isso indica um problema na sonda (ex: desconectada ou travada).
+  // Usamos uma pequena tolerância para a comparação de floats.
+  bool allSamplesIdentical = false;
+  if (abs(phSamples[0] - phSamples[NUM_SAMPLES - 1]) < 0.01) { // Tolerância de 0.01 pH
+      allSamplesIdentical = true;
+  }
 
   float sum = 0;
   // Soma os valores centrais, ignorando os extremos
@@ -1344,6 +1370,15 @@ void processPhSamples() {
 
   int numSamplesForAvg = NUM_SAMPLES - (2 * NUM_SAMPLES_TO_DISCARD);
   currentPhAvg = sum / numSamplesForAvg;
+
+  // --- Lógica de Verificação do Erro da Sonda ---
+  // Se a média de pH está fora da faixa química (0-14) ou se todas as
+  // leituras foram idênticas, ativamos o flag de erro da sonda.
+  if (currentPhAvg < 0.0 || currentPhAvg > 14.0 || allSamplesIdentical) {
+    probeError = true;
+  } else {
+    probeError = false; // Limpa o erro se as leituras voltarem ao normal.
+  }
 
   // Armazena a nova média no histórico circular
   stablePhHistory[stablePhHistoryIndex] = currentPhAvg;
@@ -1374,17 +1409,16 @@ void checkPhAndControl() {
     // Caso 1: O pH está alto.
     if (currentPhAvg > config.phIdeal + PH_CONTROL_THRESHOLD) {
       currentPhStatus = PH_HIGH;
-      digitalWrite(PIN_LED_LOW_PH, LOW);
 
-      // Se a bomba não está em cooldown, podemos prosseguir.
-      if (!isPumpOnCooldown) {
+      // A bomba só pode ser ativada se não houver erro na sonda e se não estiver em cooldown.
+      if (!isPumpOnCooldown && !probeError) {
         // Lógica de segurança: Após 2 ativações consecutivas sem uma queda de pH de pelo menos 0.1
-        // em relação ao início do ciclo, aciona o erro.
+        // em relação ao início do ciclo, aciona o erro de solução.
         if (pumpActivationCount >= 2 && (phAtFirstPump - currentPhAvg) < 0.1) {
-          solutionError = true; // Ativa o erro, mas não impede a bomba.
+          solutionError = true;
         }
 
-        // Se não há erro, ativa a bomba de acordo com o estado atual.
+        // Ativa a bomba de acordo com o estado atual.
         // Com animação na tela de monitoramento, silenciosamente no screensaver.
         if (currentState == STATE_MONITORING) {
           activatePump();
@@ -1396,7 +1430,6 @@ void checkPhAndControl() {
     // Caso 2: O pH está baixo.
     else if (currentPhAvg < config.phIdeal - PH_CONTROL_THRESHOLD) {
       currentPhStatus = PH_LOW;
-      digitalWrite(PIN_LED_LOW_PH, HIGH);
       // pH baixo significa que o sistema de correção não é necessário, então resetamos o contador.
       pumpActivationCount = 0;
       solutionError = false;
@@ -1404,7 +1437,6 @@ void checkPhAndControl() {
     // Caso 3: O pH está normal.
     else {
       currentPhStatus = PH_NORMAL;
-      digitalWrite(PIN_LED_LOW_PH, LOW);
       // pH normal significa que o sistema está estável, resetamos o contador.
       pumpActivationCount = 0;
       solutionError = false;
@@ -1561,40 +1593,54 @@ void updateMonitoringValues() {
   static int spinnerPos = 0;
   const char spinner[] = "|/-\\";
   static PhStatus lastPhStatus = PH_NORMAL; // Para rastrear a mudança de estado
+  static bool lastProbeError = false;       // Para rastrear a mudança do erro da sonda
+  static bool lastSolutionError = false;    // Para rastrear a mudança do erro da solução
 
-  // Se o erro de solução estiver ativo, ele tem prioridade máxima na exibição da linha 0.
-  if (solutionError) {
+  // Determina se a primeira linha precisa ser redesenhada.
+  // Isso acontece se a tela inteira precisa ser redesenhada (screenNeedsRedraw),
+  // ou se qualquer um dos estados de alerta/status mudou.
+  bool topLineNeedsRedraw = screenNeedsRedraw ||
+                           (probeError != lastProbeError) ||
+                           (solutionError != lastSolutionError) ||
+                           (currentPhStatus != lastPhStatus);
+
+  if (topLineNeedsRedraw) {
     lcd.setCursor(0, 0);
-    lcd.print(F("VERIFICAR SOLUCAO PH")); // Mensagem de 20 caracteres
-  } else {
-    // A tela precisa ser redesenhada se o estado do pH mudou ou se voltamos de outro menu.
-    if (screenNeedsRedraw || currentPhStatus != lastPhStatus) {
-      lcd.setCursor(0, 0);
+    // A prioridade de exibição é: Erro da Sonda > Erro de Solução > Status do pH.
+    if (probeError) {
+      lcd.print(F("   CHECAR SONDA     "));
+    } else if (solutionError) {
+      lcd.print(F(" CHECAR SOLUCAO PH"));
+    } else {
       switch (currentPhStatus) {
         case PH_LOW:
-          // Mensagem para pH baixo, com espaço inicial e preenchimento para limpar a linha.
           lcd.print(F(" PH ATUAL < IDEAL   "));
           break;
         case PH_HIGH:
-          // Mensagem para pH alto (bomba trabalhando), com espaço inicial e preenchimento.
           lcd.print(F(" AJUSTANDO PH       "));
           break;
         case PH_NORMAL:
         default:
-          // Mensagem padrão, com espaço inicial e preenchimento.
           lcd.print(F(" MONITORANDO        "));
           break;
       }
     }
+  }
 
-    // Anima o spinner em uma posição fixa no final da linha para consistência visual.
+  // O spinner só deve ser animado se não houver erros críticos.
+  // Se houver um erro, a mensagem de erro deve permanecer estática para chamar a atenção.
+  if (!probeError && !solutionError) {
     lcd.setCursor(19, 0);
     lcd.print(spinner[spinnerPos]);
     spinnerPos = (spinnerPos + 1) % 4;
   }
 
-  lastPhStatus = currentPhStatus; // Salva o estado atual para a próxima verificação
+  // Salva os estados atuais para a próxima verificação de mudança.
+  lastPhStatus = currentPhStatus;
+  lastProbeError = probeError;
+  lastSolutionError = solutionError;
 
+  // Atualiza os valores numéricos que mudam com frequência.
   // Atualiza a média de pH
   lcd.setCursor(10, 1);
   lcd.print(currentPhAvg, 2);
