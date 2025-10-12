@@ -1,8 +1,8 @@
 /***********************************************************************************************************************
  * Controlador de PH Automático para Cultivo
  *
- * Autor: Jules (Assistente de IA)
- * Versão: 1.9.3
+ * Autor: Rafael Galvani e Jules
+ * Versão: 2.1
  * Data: 2025-10-12
  *
  * Descrição:
@@ -109,6 +109,7 @@ struct SystemConfig {
   bool isCalibrated2Points;     // Flag para saber se a calibragem de 2 pontos foi feita
   unsigned long pumpDurationMs; // Duração que a bomba fica ligada (em milissegundos)
   unsigned int pumpCooldownMinutes; // Tempo de espera (em minutos) entre ativações da bomba
+  byte pumpSpeedPercentage;     // Velocidade da bomba (em percentagem, 5-100)
 };
 
 SystemConfig config; // Variável global que conterá todas as configurações do sistema
@@ -135,6 +136,7 @@ enum SystemState {
   STATE_TECH_ACTIVATE_PUMP,
   STATE_TECH_SET_PUMP_TIMER,
   STATE_TECH_SET_COOLDOWN,  // Novo estado para ajustar o cooldown da bomba
+  STATE_TECH_SET_PUMP_SPEED, // Novo estado para ajustar a velocidade da bomba
   STATE_TECH_RESTART_CONFIRM
 };
 
@@ -188,6 +190,7 @@ unsigned long lastActivityTime = 0;   // 'millis()' da última interação do us
 float tempPhIdeal;                    // Valor temporário ao ajustar o pH ideal
 unsigned long tempPumpDurationMs;     // Valor temporário ao ajustar o timer da bomba
 unsigned int tempPumpCooldownMinutes; // Valor temporário ao ajustar o cooldown
+byte tempPumpSpeedPercentage;         // Valor temporário ao ajustar a velocidade da bomba
 int menuCursor = 0;                   // Posição do cursor nos menus
 bool screenNeedsRedraw = true;        // Flag para controlar a atualização da tela e evitar flickering
 
@@ -371,6 +374,9 @@ void loop() {
     case STATE_TECH_SET_COOLDOWN:
         handleSetCooldown();
         break;
+    case STATE_TECH_SET_PUMP_SPEED:
+        handleSetPumpSpeed();
+        break;
     case STATE_TECH_RESTART_CONFIRM:
       handleTechRestartConfirm();
       break;
@@ -513,6 +519,76 @@ float convertVoltageToPh(float voltage, float temperature) {
   float phValue = 7.0 + (voltage - config.calibOffsetVoltage) / (config.calibSlope * tempFactor);
 
   return phValue;
+}
+
+/**
+ * @brief Desenha a tela de ajuste da velocidade da bomba no LCD.
+ * Mostra o título, o valor atual em percentagem e a instrução para salvar.
+ */
+void displaySetPumpSpeed() {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F(" AJUSTAR VEL. BOMBA "));
+    lcd.setCursor(0, 2);
+    lcd.print(F("  Velocidade: "));
+    lcd.print(tempPumpSpeedPercentage); // Mostra o valor percentual que o usuário está editando
+    lcd.print("%  ");
+    lcd.setCursor(0, 3);
+    lcd.print(F("MENU para Salvar"));
+}
+
+/**
+ * @brief Gerencia a tela de ajuste da velocidade da bomba.
+ * Esta função é chamada repetidamente quando o sistema está no estado STATE_TECH_SET_PUMP_SPEED.
+ * Ela lê os botões, atualiza o valor temporário da velocidade e salva a configuração na EEPROM
+ * quando o usuário pressiona o botão MENU.
+ */
+void handleSetPumpSpeed() {
+    if (screenNeedsRedraw) {
+        // A variável tempPumpSpeedPercentage já foi carregada no handleTechMenu ao entrar neste estado.
+        // A tela só é redesenhada se o valor mudar, para evitar flickering (piscadas).
+        displaySetPumpSpeed();
+        screenNeedsRedraw = false;
+    }
+
+    // Se o usuário ficar inativo por muito tempo, o menu volta para a tela anterior para economizar energia e evitar burn-in.
+    if (millis() - lastActivityTime > MENU_TIMEOUT_MS) {
+        currentState = STATE_TECH_MENU;
+        menuCursor = 5; // Volta para a opção "VEL Bomba"
+        screenNeedsRedraw = true;
+        return;
+    }
+
+    // Lógica dos botões para ajustar em incrementos de 5%
+    if (btnUpPressed) {
+        tempPumpSpeedPercentage += 5;
+        screenNeedsRedraw = true; // Marca a tela para ser redesenhada com o novo valor
+    }
+    if (btnDownPressed) {
+        tempPumpSpeedPercentage -= 5;
+        screenNeedsRedraw = true;
+    }
+
+    // Limita o valor para ficar dentro da faixa permitida (5% a 100%).
+    // Isso evita que o usuário selecione uma velocidade muito baixa (que não moveria a bomba) ou valores inválidos.
+    if (tempPumpSpeedPercentage > 100) {
+        tempPumpSpeedPercentage = 100;
+    }
+    if (tempPumpSpeedPercentage < 5) {
+        tempPumpSpeedPercentage = 5;
+    }
+
+    // Se o botão MENU for pressionado, o valor é salvo.
+    if (btnMenuPressed) {
+        // Salva o valor percentual diretamente na configuração.
+        // A conversão para PWM será feita apenas no momento de ativar a bomba.
+        config.pumpSpeedPercentage = tempPumpSpeedPercentage;
+        saveConfigToEEPROM(); // Grava toda a estrutura de configuração na memória permanente.
+        displaySuccessMessage("VELOCIDADE SALVA!"); // Mostra uma mensagem de confirmação para o usuário.
+        currentState = STATE_TECH_MENU;
+        menuCursor = 5; // Deixa o cursor na mesma opção para facilitar novos ajustes.
+        screenNeedsRedraw = true;
+    }
 }
 
 
@@ -1084,7 +1160,7 @@ void handleTechMenu() {
         screenNeedsRedraw = true;
         return;
     }
-    const int numOptions = 7; // Agora são 7 opções no menu
+    const int numOptions = 8; // Agora são 8 opções no menu
     if (btnUpPressed) {
         menuCursor = (menuCursor > 0) ? menuCursor - 1 : numOptions - 1;
         screenNeedsRedraw = true;
@@ -1113,11 +1189,16 @@ void handleTechMenu() {
                 tempPumpCooldownMinutes = config.pumpCooldownMinutes; // Carrega o valor atual para edição
                 currentState = STATE_TECH_SET_COOLDOWN;
                 break;
-            case 5: // Reiniciar
+            case 5: // VEL BOMBA
+                // Carrega o valor percentual atual diretamente da configuração para a variável de edição.
+                tempPumpSpeedPercentage = config.pumpSpeedPercentage;
+                currentState = STATE_TECH_SET_PUMP_SPEED;
+                break;
+            case 6: // Reiniciar
                 currentState = STATE_TECH_RESTART_CONFIRM;
                 menuCursor = 1; // Padrão em "NÃO"
                 break;
-            case 6: // Voltar
+            case 7: // Voltar
                 currentState = STATE_MAIN_MENU;
                 menuCursor = 2; // Volta para a opção "Menu Tecnico"
                 break;
@@ -1201,17 +1282,19 @@ void handleTechActivatePump() {
     }
 
     // Lógica de controle direto da bomba.
-    // O pino do botão UP usa INPUT_PULLUP (LOW quando pressionado).
-    // O MOSFET é ativado com sinal HIGH.
+    // O pino do botão UP usa INPUT_PULLUP, então seu estado é HIGH quando pressionado.
     if (digitalRead(PIN_BTN_UP) == HIGH) {
-        digitalWrite(PIN_MOSFET_PUMP, HIGH); // Botão pressionado, LIGA a bomba.
+        // Converte a velocidade de percentagem para PWM e liga a bomba.
+        byte pwmValue = map(config.pumpSpeedPercentage, 5, 100, 13, 255);
+        analogWrite(PIN_MOSFET_PUMP, pwmValue);
     } else {
-        digitalWrite(PIN_MOSFET_PUMP, LOW); // Botão solto, DESLIGA a bomba.
+        // Desliga a bomba (PWM = 0) quando o botão é solto.
+        analogWrite(PIN_MOSFET_PUMP, 0);
     }
 
     // Lógica para sair do menu
     if (btnMenuPressed) {
-        digitalWrite(PIN_MOSFET_PUMP, LOW); // Garante que a bomba seja desligada (estado LOW) ao sair
+        analogWrite(PIN_MOSFET_PUMP, 0); // Garante que a bomba seja desligada ao sair
         currentState = STATE_TECH_MENU;
         menuCursor = 2; // Volta para a opção "Ativar Bomba"
         screenNeedsRedraw = true;
@@ -1459,8 +1542,9 @@ void activatePump() {
   // Exibe a mensagem inicial
   displayPumpActionScreen(true);
 
-  // Liga a bomba e mostra a barra de progresso
-  digitalWrite(PIN_MOSFET_PUMP, HIGH); // LIGA a bomba (ativo em HIGH)
+  // Converte a velocidade de percentagem para PWM e ativa a bomba
+  byte pwmValue = map(config.pumpSpeedPercentage, 5, 100, 13, 255);
+  analogWrite(PIN_MOSFET_PUMP, pwmValue); // LIGA a bomba (via PWM)
 
   // Simula uma barra de progresso que corresponde ao tempo de acionamento da bomba
   lcd.setCursor(0, 2);
@@ -1508,8 +1592,9 @@ void activatePumpSilently() {
   lastPhWhenPumped = currentPhAvg;
   pumpActivationCount++;
 
-  // Ativa a bomba e os flags de controle
-  digitalWrite(PIN_MOSFET_PUMP, HIGH); // LIGA a bomba
+  // Converte a velocidade de percentagem para PWM e ativa a bomba
+  byte pwmValue = map(config.pumpSpeedPercentage, 5, 100, 13, 255);
+  analogWrite(PIN_MOSFET_PUMP, pwmValue); // LIGA a bomba (via PWM)
   isSilentPumpActive = true;
   silentPumpStartTime = millis();
 
@@ -1796,8 +1881,8 @@ void displayTechMenu() {
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print(F("    MENU TECNICO    "));
-    const char* options[] = {"Valores Brutos", "Checar Sensores", "Ativar Bomba", "Timer Bomba", "Cooldown", "Reiniciar", "Voltar"};
-    const int numOptions = 7;
+    const char* options[] = {"Valores Brutos", "Checar Sensores", "Ativar Bomba", "Timer Bomba", "Cooldown", "VEL Bomba", "Reiniciar", "Voltar"};
+    const int numOptions = 8;
 
     // Lógica de rolagem para exibir 3 itens em uma tela com 1 linha de título
     int displayOffset = 0;
@@ -1919,6 +2004,11 @@ void loadConfigFromEEPROM() {
     if (config.pumpCooldownMinutes < 1 || config.pumpCooldownMinutes > 60) {
         config.pumpCooldownMinutes = 5; // Padrão de 5 minutos
     }
+    // Verificação de segurança para a velocidade da bomba. Se o valor lido estiver fora da faixa válida (5-100),
+    // define o padrão de 25%. Isso corrige valores inválidos ou de EEPROM não inicializada.
+    if (config.pumpSpeedPercentage < 5 || config.pumpSpeedPercentage > 100) {
+        config.pumpSpeedPercentage = 25;
+    }
   } else {
     // EEPROM não inicializada ou dados corrompidos, usa valores padrão
     config.phIdeal = PH_IDEAL_DEFAULT;
@@ -1928,6 +2018,7 @@ void loadConfigFromEEPROM() {
     config.isCalibrated2Points = false;
     config.pumpDurationMs = PUMP_DURATION_MS_DEFAULT; // Define o padrão para o novo campo
     config.pumpCooldownMinutes = 5; // Padrão de 5 minutos
+    config.pumpSpeedPercentage = 25; // Padrão de 25% de velocidade
     saveConfigToEEPROM(); // Salva os padrões para a próxima inicialização
   }
 }
