@@ -1321,12 +1321,12 @@ void handleSetPumpTimer() {
 
     // Lógica dos botões
     if (btnUpPressed) {
-        tempPumpDurationMs += 500; // Incrementa de 0.5 em 0.5 segundos
+        tempPumpDurationMs += 100; // Incrementa de 0.1 em 0.1 segundos
         screenNeedsRedraw = true;
     }
     if (btnDownPressed) {
-        if (tempPumpDurationMs >= 500) {
-            tempPumpDurationMs -= 500; // Decrementa de 0.5 em 0.5 segundos
+        if (tempPumpDurationMs >= 100) {
+            tempPumpDurationMs -= 100; // Decrementa de 0.1 em 0.1 segundos
         } else {
             tempPumpDurationMs = 0;
         }
